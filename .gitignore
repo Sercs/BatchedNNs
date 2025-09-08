@@ -1,0 +1,4 @@
+tests/datasets
+tests/data
+
+*.json
