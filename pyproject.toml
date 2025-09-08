@@ -1,0 +1,8 @@
+[project]
+name = "ai_metabolsim"
+version = "0.1.0"
+dependencies = [
+    "numpy",
+    "torch",
+    "matplotlib",
+]
