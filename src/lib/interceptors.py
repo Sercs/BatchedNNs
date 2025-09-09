@@ -41,7 +41,7 @@ class Interceptor:
 """
 
 class Handler:
-    # >>> 
+    # >>> Functions <<<
     def before_train_func(self, name, parameter, state=None): pass
     def after_train_func(self, name, parameter, state=None): pass
     def before_epoch_func(self, name, parameter, state=None): pass
@@ -339,7 +339,7 @@ class ForwardPassCounter(Interceptor):
         state['data']['forward_pass_counts'] = []
 
     def after_update(self, state):
-        idx = state.get('current_train_idx')
+        idx = state.get('idx')
         padding_value = state.get('padding_value', -1)
 
         if idx is None:
@@ -363,7 +363,7 @@ class ForwardItemCounter(Interceptor):
         state['data']['forward_item_counts'] = []
 
     def after_update(self, state):
-        idx = state.get('current_train_idx')
+        idx = state.get('idx')
         padding_value = state.get('padding_value', -1)
 
         if idx is None:
@@ -432,7 +432,7 @@ class PerSampleBackwardCounter(Interceptor):
 
     def after_update(self, state):
         per_sample_loss = state.get('per_sample_losses').cpu()
-        idx = state.get('current_train_idx').cpu()
+        idx = state.get('idx').cpu()
 
         if per_sample_loss is None or idx is None:
             return
@@ -456,7 +456,8 @@ class PerSampleBackwardCounter(Interceptor):
 
     def after_train(self, state):
         state['data']['per_sample_backward_counts'] = self.per_sample_backward_counts.clone().numpy()
-        
+
+# TODO: make batch optimizers
 class PerNetworkLearningRate(Interceptor):
     def __init__(self, lr_scales):
         super().__init__()

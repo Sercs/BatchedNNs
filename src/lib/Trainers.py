@@ -72,8 +72,9 @@ class Trainer():
         # >>> Main loop <<<
         self._fire_event('before_train')
         for epoch in range(n_epochs):
-
             print(f"Epoch: {epoch+1}")
+            
+            self._fire_event('before_epoch')
             for (x, y, idx) in self.train_dataloader:
                 batch_size = x.size(0) # handles varying batch_size
                 
@@ -91,17 +92,22 @@ class Trainer():
                     
                 sample_counter += test_step
                 test_epoch += test_step
-                self._fire_event('before_update')
+                self._fire_event('before_update') # I like to use this for logging initializations
                 step_loss, step_accuracy = self.train_step(x, y, idx)
-                self.state['running_loss'] = step_loss.detach().cpu() * batch_size
+                self.state['running_loss'] = step_loss.detach().cpu() * batch_size # multiply by batch size since we average
                 self.state['running_accuracy'] = step_accuracy.detach().cpu()
-                self._fire_event('after_update')
-                if test_epoch >= test_interval:
-                    print(test_epoch)
-                    self._fire_event('before_test')
-                    self._fire_event('on_test_run') # oh god
-                    self._fire_event('after_test')
+                self._fire_event('after_update') 
+                if test_epoch >= test_interval: # TODO: it may be possible to avoid this check and instead 
+                                                #       have interceptors that need it look for a state['count']
+                    print(test_epoch)            
+                    self._fire_event('before_test') # initialization stuff usually
+                    self._fire_event('on_test_run') # used primarily by the test loop 
+                    self._fire_event('after_test')  # typically for recording metrics
+                    
+                    # quick prints for stats
+                    # TODO: probably could make an interceptor print all the data we want
                     print(self.state['data']['time_taken'][-1])
+                    print(self.state['data']['test_accuracies']['test'][-1])
                     #print(self.state['data']['energies_l1_layerwise'])
                     #print(self.state['data']['minimum_energies_l1_layerwise'])
                     #print(self.state['data']['energies_l1'][-1])
@@ -111,49 +117,56 @@ class Trainer():
                     #print(self.state['data']['energies_l0'][-1])
                     #print(self.state['data']['minimum_energies_l0'][-1])
                     test_epoch = 0
+                    
                 if stop_on_sample > 0 and sample_counter > stop_on_sample:
-                    self._fire_event('after_train')
+                    self._fire_event('after_train') # mid epoch stop
                     return
-                
-        self._fire_event('after_train')
+            self._fire_event('after_epoch') # record stuff
+        self._fire_event('after_train') # record stuff
 
     def train_step(self, x, y, idx):
         x, y, idx = x.to(self.device), y.to(self.device), idx.to(self.device) 
         if len(x.shape) < 3:
             x, y = x.unsqueeze(1), y.unsqueeze(1).repeat((1, self.n_networks, 1))
             idx = idx.unsqueeze(1).repeat(1, self.n_networks)
-        self.state['current_train_idx'] = idx
+            
+        # note that these will be device bound
+        self.state['x'], self.state['y'], self.state['idx'] = x, y, idx # useful for data augmentation
         
-        
-        self._fire_event('before_train_forward')
+        self._fire_event('before_train_forward') # do stuff like data augmentation or idx tracking here
         y_hat = self.model(x)
         
         # if we get loss here, we can modify it with observers
         self.optimizer.zero_grad()
-        mask = (idx != self.padding_value)
+        
         per_sample_supervised_loss = self.criterion(y_hat, y, idx)
-        self.state['per_sample_losses'] = per_sample_supervised_loss
+        self.state['per_sample_losses'] = per_sample_supervised_loss # useful for computing which samples were used
         
-        masked_losses = per_sample_supervised_loss * mask
-        n_valid_samples = mask.sum(0)
+        # this code essentially averages per batch accounting for buffered items
+        mask = (idx != self.padding_value) # get padded items
+        masked_losses = per_sample_supervised_loss * mask # mask them
+        n_valid_samples = mask.sum(0) # get the total items 
+        supervised_loss = masked_losses.sum(0) / (n_valid_samples + 1e-12) # average 
+                            #                                         |
+                            # (eps avoids zero division error and in this case all losses will be zero anyway)
         
-        supervised_loss = masked_losses.sum(0) / (n_valid_samples + 1e-12)
-        self.state['loss'] = supervised_loss
+        self.state['loss'] = supervised_loss # main loss
         
-        correct = ((y_hat.argmax(-1) == y.argmax(-1)) * (idx != self.padding_value)).sum(0)
-        self.state['correct'] = correct
+        correct = ((y_hat.argmax(-1) == y.argmax(-1)) * (idx != self.padding_value)).sum(0) # correct items for classification tasks
+        self.state['correct'] = correct # we can ignore this in regression cases
         
-        self._fire_event('after_train_forward')
+        self._fire_event('after_train_forward') # do stuff like add auxillary losses on state['loss'] 
+                                                # or count sample backwards in state['per_sample_losses']
+                                                
+        loss = self.state['loss'] # get possibly altered loss
         
-        loss = self.state['loss']
+        loss.sum().backward() # grads
         
-        loss.sum().backward()
-        
-        self._fire_event('before_step')
+        self._fire_event('before_step') # do stuff that requires gradients but not steps (i.e. masking grads, applying LRs)
         
         self.optimizer.step()
         
-        self._fire_event('after_step')
+        self._fire_event('after_step') # get step info (i.e. energy calculations)
         
         return loss, correct
     

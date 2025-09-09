@@ -1,5 +1,5 @@
-from lib import trainables, trainers, interceptors, batch_losses, samplers
-from lib.interceptors import interceptors
+from lib import trainables, trainers, interceptors, batch_losses, batch_optimizers, samplers, interceptors
+
 from lib import data_manager as dm
 
 from lib.utils import pluck_masked_values
@@ -80,7 +80,8 @@ if __name__ == '__main__':
                                                         init_config={'a' : -1,
                                                                      'b' : 1})).to(DEVICE)
     
-    optimizer = torch.optim.SGD(model.parameters(), lr=0.01) # works with torch optim
+    optimizer = torch.optim.AdamW(model.parameters(), 
+                                       lr=0.0001) # works with torch optim
     criterion1 = batch_losses.CrossEntropyLoss(per_sample=True, reduction='mean') # note batch losses
     
     previous_param_provider = interceptors.PreviousParameterProvider()
@@ -112,7 +113,7 @@ if __name__ == '__main__':
                                test_dataloader, 
                                trackers=trackers, 
                                device=DEVICE)
-    trainer.train_loop(0.02, 0.01)
+    trainer.train_loop(0.05, 0.01)
     plt.figure(dpi=240)
     # function to grab indices that meet a condition in one array and use those indices to pull data from another array
     res = pluck_masked_values(np.array(trainer.state['data']['test_accuracies']['test']), # filter from

@@ -73,7 +73,7 @@ class BatchLinear(nn.Module):
                 x = self.activation(torch.einsum('bni,nji->bnj', x, self.weights) + self.biases)
         return x
 
-# it may be possible to make this an Observer           
+# TODO: it may be possible to make this an Interceptor           
 class BatchLinearMasked(nn.Module):
     def __init__(self, n_linears, n_ins, n_outs, activation=nn.Identity(), add_residual=False, n_recurs=0, init_method=None, init_config={}):
         super().__init__()
