@@ -5,12 +5,12 @@ import numpy as np
 import time
 """
     PyTorch-Lightning inspired.
-    Observers represent any code you'd want to run during training but not
+    Interceptors represent any code you'd want to run during training but not
     necessarily during every training run you implement. They listen for 
     functions called in the main training loop to make modifications or 
     logging.
 """
-class Observer:
+class Interceptor:
     def __init__(self):
         # this will be populated by the Trainer upon initialization.
         self.trainer = None
@@ -34,9 +34,9 @@ class Observer:
     def after_step(self, state): pass
     
 """
-    Handlers behave like Observers, listening for functions to do something.
+    Handlers behave like Interceptors, listening for functions to do something.
     However, they only operate on each parameter as it comes. They are 
-    typically paired with the ParamIterator(Observer) to make looping over 
+    typically paired with the ParamIterator(Interceptor) to make looping over 
     layers more efficient.
 """
 
@@ -72,11 +72,30 @@ class Handler:
     def before_step_log(self, state=None): pass
     def after_step_log(self, state=None): pass
 
-class Data(Observer):
+################################ DATA ##################################
+"""
+The main Interceptor for storing any data. Any and all Interceptors when 
+necessary save data to state['data'].
+""" 
+class Data(Interceptor): 
     def before_train(self, state):
         state['data'] = {}
-        
-class TestLoop(Observer):
+
+############################## TEST LOOP ##################################
+"""
+An optional test loop. It expects a name which indicates which test is being done
+(i.e. test loop, train loop, validation loop,etc) and dictionary of criterions with 
+{name of loss function : loss function} so that multiple criterions can be tested
+against. The loss function should be setup with per_sample=False (because we
+don't need to keep track of which items should be computed against and which 
+are padded) and reduce='sum' (because we want average metrics which requires
+averaging over batch size and dataset size, and (currently) we won't 
+know these ahead of time).
+""" 
+
+# TODO: try to get better averages.
+
+class TestLoop(Interceptor):
     """
     An observer that performs a test/validation loop over a given dataset.
     
@@ -88,7 +107,7 @@ class TestLoop(Observer):
         self.test_dataloader = test_dataloader
         self.criterions = {name: crit.to(device) for name, crit in criterions.items()}
         self.device = device
-        self.trainer = None # This will be set by the Trainer
+        self.trainer = None # this will be set by the Trainer
 
     def on_test_run(self, state):
         # set the current context so other observers know which dataset is being tested.
@@ -109,9 +128,7 @@ class TestLoop(Observer):
                 
                 y_hat = state['model'](x)
 
-                # since BatchLosses reduce by mean, we multiple by batch_size
-                # and then we can average at the end
-                # slightly hacky
+
                 batch_losses = {name: crit(y_hat, y, idx)
                                     for name, crit in self.criterions.items()
                                 }
@@ -128,7 +145,12 @@ class TestLoop(Observer):
 
         state['model'].train()
         
-class Timer(Observer):
+############################# METRICS ################################
+"""
+These Interceptors deal with metrics like wall clock speed, losses and accuracies.
+"""
+    
+class Timer(Interceptor):
     def __init__(self):
         super().__init__()
         self.last_test_time = None
@@ -145,7 +167,7 @@ class Timer(Observer):
         
         self.last_test_time = current_time
 
-class RunningLossTracker(Observer):
+class RunningLossTracker(Interceptor):
     def __init__(self):
         super().__init__()
 
@@ -160,7 +182,7 @@ class RunningLossTracker(Observer):
         state['data']['running_losses'].append(self.train_loss_accumulator.clone().numpy())
         self.train_loss_accumulator = torch.zeros((state['n_networks'],))
 
-class TestingLossTracker(Observer):
+class TestingLossTracker(Interceptor):
     def __init__(self, test_names, criterion_names):
         super().__init__()
         if type(test_names) is not list:
@@ -203,7 +225,7 @@ class TestingLossTracker(Observer):
             crit: torch.zeros((state['n_networks'],)) for crit in self.criterion_names
         }
 
-class RunningAccuracyTracker(Observer):
+class RunningAccuracyTracker(Interceptor):
     def __init__(self):
         super().__init__()
 
@@ -218,7 +240,7 @@ class RunningAccuracyTracker(Observer):
         state['data']['running_accuracies'].append(self.train_accuracy_accumulator.clone().numpy())
         self.train_accuracy_accumulator = torch.zeros((state['n_networks'],))
 
-class TestingAccuracyTracker(Observer):
+class TestingAccuracyTracker(Interceptor):
     def __init__(self, test_names):
         super().__init__()
         if type(test_names) is not list:
@@ -249,7 +271,7 @@ class TestingAccuracyTracker(Observer):
     def _reset_test(self, test_name, state):
         self.test_accuracies[test_name] = torch.zeros((state['n_networks'],))
         
-class LossTracker(Observer):
+class LossTracker(Interceptor):
     def before_train(self, state):
         self.train_loss = torch.zeros((state['n_networks'],))
         self.test_loss = torch.zeros((state['n_networks'],))
@@ -274,7 +296,7 @@ class LossTracker(Observer):
         state['data']['running_losses'].append(self.train_loss.clone().detach().cpu().numpy())
         self._reset_train(state)
         
-class AccuracyTracker(Observer):
+class AccuracyTracker(Interceptor):
     def before_train(self, state):
         self.train_accuracy = torch.zeros((state['n_networks'],))
         self.test_accuracy = torch.zeros((state['n_networks'],))
@@ -298,8 +320,16 @@ class AccuracyTracker(Observer):
         self._reset_test(state)
         state['data']['running_accuracies'].append(self.train_accuracy.clone().detach().cpu().numpy())
         self._reset_train(state)
-        
-class ForwardPassCounter(Observer):
+
+
+############################# COUNTERS ################################
+"""
+These Interceptors primarily deal with counting items: forward passes,
+the number of items in a forward pass (i.e. batching), the number of 
+items actually used for learning, etc.
+"""
+
+class ForwardPassCounter(Interceptor):
     def __init__(self):
         super().__init__()
 
@@ -323,7 +353,7 @@ class ForwardPassCounter(Observer):
     def after_test(self, state):
         state['data']['forward_pass_counts'].append(self.forward_pass_counts.clone().numpy())
 
-class ForwardItemCounter(Observer):
+class ForwardItemCounter(Interceptor):
     def __init__(self):
         super().__init__()
 
@@ -348,7 +378,7 @@ class ForwardItemCounter(Observer):
         """Logs the current counts to the data dictionary."""
         state['data']['forward_item_counts'].append(self.forward_item_counts.clone().numpy())
         
-class BackwardPassCounter(Observer):
+class BackwardPassCounter(Interceptor):
     def __init__(self):
         super().__init__()
 
@@ -368,7 +398,7 @@ class BackwardPassCounter(Observer):
     def after_test(self, state):
         state['data']['backward_pass_counts'].append(self.backward_pass_counts.clone().numpy())
 
-class BackwardItemCounter(Observer):
+class BackwardItemCounter(Interceptor):
     def __init__(self):
         super().__init__()
 
@@ -388,7 +418,7 @@ class BackwardItemCounter(Observer):
     def after_test(self, state):
         state['data']['backward_item_counts'].append(self.backward_item_counts.clone().numpy())
         
-class PerSampleBackwardCounter(Observer):
+class PerSampleBackwardCounter(Interceptor):
     def __init__(self, max_samples):
         super().__init__()
         if not isinstance(max_samples, int) or max_samples <= 0:
@@ -427,7 +457,7 @@ class PerSampleBackwardCounter(Observer):
     def after_train(self, state):
         state['data']['per_sample_backward_counts'] = self.per_sample_backward_counts.clone().numpy()
         
-class PerNetworkLearningRate(Observer):
+class PerNetworkLearningRate(Interceptor):
     def __init__(self, lr_scales):
         super().__init__()
         if not isinstance(lr_scales, torch.Tensor):
@@ -458,8 +488,14 @@ class PerNetworkLearningRate(Observer):
             return grad * lr_scales_reshaped.to(grad.device)
             
         return hook
-    
-class L1Regularizer(Observer):
+
+############################# AUXILLARY LOSSES ################################
+"""
+These Interceptors make modifications to the loss function before computing 
+gradints and are therefore useful for auxillary losses like L1/L2 regularization.
+"""
+
+class L1Regularizer(Interceptor):
     def __init__(self, lambda_l1=0.01, reference_provider=None):
         super().__init__()
         if isinstance(lambda_l1, (list, np.ndarray)):
@@ -511,7 +547,7 @@ class L1Regularizer(Observer):
         scaled_penalty = l1_penalty * lambda_tensor
         state['loss'] = state['loss'] + scaled_penalty
 
-class L2Regularizer(Observer):
+class L2Regularizer(Interceptor):
     def __init__(self, lambda_l2=0.01, reference_provider=None):
         super().__init__()
         if isinstance(lambda_l2, (list, np.ndarray)):
@@ -567,8 +603,17 @@ class L2Regularizer(Observer):
         
         state['loss'] = state['loss'] + scaled_penalty
         
+############################# PROVIDERS ################################
+"""
+Providers "provide" some kind of value that is often used by multiple other
+Interceptors. This avoid repeated memory allocation. For instance, if 
+multiple Interceptors require the previous parameters, with these they would 
+each store previous parameters. Instead we pass a provider to the Interceptor
+where they can share their use.
+"""
+        
  # stops repeated memory (i.e. if multiple observers need previous parameters)
-class PreviousParameterProvider(Observer):
+class PreviousParameterProvider(Interceptor):
     def __init__(self):
         super().__init__() #                                   need model for intialization 
         self.previous_parameters = {}
@@ -582,7 +627,7 @@ class PreviousParameterProvider(Observer):
     def get_parameters(self):
         return self.previous_parameters
     
-class PreviousPreviousParameterProvider(Observer):
+class PreviousPreviousParameterProvider(Interceptor):
     def __init__(self, previous_parameter_provider):
         super().__init__()
         self.previous_previous_parameters = {}
@@ -596,7 +641,7 @@ class PreviousPreviousParameterProvider(Observer):
         return self.previous_previous_parameters
         
         # stops repeated memory
-class InitialParameterProvider(Observer):
+class InitialParameterProvider(Interceptor):
     def __init__(self, model=None):
         super().__init__() # need model for intialization
         if model is None:
@@ -610,8 +655,19 @@ class InitialParameterProvider(Observer):
     
     def get_parameters(self):
         return self.initial_parameters
-   
-class MinimumEnergyL1NetworkTracker(Observer):
+
+############################# ENERGY FUNCS ################################
+"""
+These Interceptors compute energy calculations (Li & van Rossum 2020) and 
+usually require a provider. They have been split into network, layerwise and neuronwise
+to get different granularities of energy metrics. However, below we define 
+Handlers which are (slightly) more efficient when using multiple parameter
+trackers simultaneously. Since each energy function requires tracking parameters
+we need to loop over each layer for each tracker we use. Sometimes this loop
+is negiligble compared to the tensor operations.
+"""    
+
+class MinimumEnergyL1NetworkTracker(Interceptor):
     def __init__(self, initial_parameter_provider):
         self.provider = initial_parameter_provider
     
@@ -629,7 +685,7 @@ class MinimumEnergyL1NetworkTracker(Observer):
     def after_test(self, state):
         state['data']['minimum_energies_l1'].append(self.minimum_energy_l1.clone().numpy())
  
-class EnergyL1NetworkTracker(Observer):
+class EnergyL1NetworkTracker(Interceptor):
     def __init__(self, previous_parameter_provider):
         self.provider = previous_parameter_provider
     
@@ -647,7 +703,7 @@ class EnergyL1NetworkTracker(Observer):
     def after_test(self, state):
         state['data']['energies_l1'].append(self.energy_l1.clone().numpy())
         
-class MinimumEnergyL1LayerwiseTracker(Observer):
+class MinimumEnergyL1LayerwiseTracker(Interceptor):
     def __init__(self, initial_parameter_provider):
         super().__init__()
         self.provider = initial_parameter_provider
@@ -672,7 +728,7 @@ class MinimumEnergyL1LayerwiseTracker(Observer):
         for n, energy in self.minimum_energy_l1_layerwise.items():
             state['data']['minimum_energies_l1_layerwise'][n].append(energy.clone().numpy())
 
-class EnergyL1LayerwiseTracker(Observer):
+class EnergyL1LayerwiseTracker(Interceptor):
     def __init__(self, previous_parameter_provider):
         super().__init__()
         self.provider = previous_parameter_provider
@@ -696,7 +752,7 @@ class EnergyL1LayerwiseTracker(Observer):
         for n, energy in self.energy_l1_layerwise.items():
             state['data']['energies_l1_layerwise'][n].append(energy.clone().numpy())
             
-class MinimumEnergyL1NeuronwiseTracker(Observer):
+class MinimumEnergyL1NeuronwiseTracker(Interceptor):
     def __init__(self, initial_parameter_provider, energy_direction='incoming'):
         super().__init__()
         self.provider = initial_parameter_provider
@@ -737,7 +793,7 @@ class MinimumEnergyL1NeuronwiseTracker(Observer):
             for e_dir, energy in layer_energies.items():
                 state['data']['minimum_energies_l1_neuronwise'][n][e_dir].append(energy.clone().numpy())
 
-class EnergyL1NeuronwiseTracker(Observer):
+class EnergyL1NeuronwiseTracker(Interceptor):
 
     def __init__(self, previous_parameter_provider, energy_direction='incoming'):
         super().__init__()
@@ -793,7 +849,7 @@ class EnergyL1NeuronwiseTracker(Observer):
             for e_dir, energy in layer_energies.items():
                 state['data']['energies_l1_neuronwise'][n][e_dir].append(energy.clone().numpy())
         
-class MinimumEnergyL2NetworkTracker(Observer):
+class MinimumEnergyL2NetworkTracker(Interceptor):
     def __init__(self, initial_parameter_provider):
         self.provider = initial_parameter_provider
     
@@ -816,7 +872,7 @@ class MinimumEnergyL2NetworkTracker(Observer):
     def after_test(self, state):
         state['data']['minimum_energies_l2'].append(self.minimum_energy_l2.clone().numpy())   
         
-class EnergyL2NetworkTracker(Observer):
+class EnergyL2NetworkTracker(Interceptor):
     def __init__(self, previous_parameter_provider):
         self.provider = previous_parameter_provider
     
@@ -839,7 +895,7 @@ class EnergyL2NetworkTracker(Observer):
     def after_test(self, state):
         state['data']['energies_l2'].append(self.energy_l2.clone().numpy())
         
-class EnergyL0NetworkTracker(Observer):
+class EnergyL0NetworkTracker(Interceptor):
     def before_train(self, state):
         self.energy_l0 = torch.zeros((state['n_networks'],))
         state['data']['energies_l0'] = []
@@ -853,7 +909,7 @@ class EnergyL0NetworkTracker(Observer):
     def after_step(self, state):
         state['data']['energies_l0'].append(self.energy_l0.clone().numpy())
         
-class MinimumEnergyL0NetworkTracker(Observer):
+class MinimumEnergyL0NetworkTracker(Interceptor):
     def __init__(self, initial_parameter_provider):
         self.provider = initial_parameter_provider
         
@@ -872,20 +928,21 @@ class MinimumEnergyL0NetworkTracker(Observer):
     def after_step(self, state):
         state['data']['minimum_energies_l0'].append(self.minimum_energy_l0.clone().numpy())
         
+########################### PARAMETER ITERATOR ################################
 
 """
-    ParameterIterator is designed to make Observers that require looping over
-    parameters more flexible and more efficient. We might make an
-    Observer for each data we're interested in. However, if these loop over
-    parameters then we make multiple calls for a loop. Instead, ParameterIterator
-    takes multiple of these Observers (termed Handlers) and calls them for each
-    parameter.
+ParameterIterator is designed to make Interceptors that require looping over
+parameters more flexible and more efficient. We might make an
+Interceptor for each data we're interested in. However, if these loop over
+parameters then we make multiple calls for a loop. Instead, ParameterIterator
+takes multiple of these Interceptors (termed Handlers) and calls them for each
+parameter.
 """
-class ParameterIterator(Observer):
+class ParameterIterator(Interceptor):
     def __init__(self, handlers):
         self.handlers = handlers
         
-    def _func(self, state, event_name):
+    def _func(self, state, event_name): # use when you want to compute over individual parameters
         event_name += '_func'
         #print(event_name)
         for n, p in state['model'].named_parameters():
@@ -947,6 +1004,15 @@ class ParameterIterator(Observer):
         
         if self._should_run('log', 'after_test'):
             self._log(state, 'after_test')
+            
+########################### HANDLERS ################################
+"""
+Handlers "handle" parameters during a loop over parameters. They require a
+[dict] with key events they intercept along with a value [list: 'log', 'func'] 
+indicating the computation that happens: a function or log. Functions expect
+name of parameter ('n'), parameter values ('p') and state.
+"""
+
             
 class EnergyL0NetworkHandler(Handler):
     

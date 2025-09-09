@@ -69,7 +69,7 @@ class DatasetWithIdx(Dataset):
 def temp_onehot(y, n_classes=10):
     return torch.zeros(n_classes, dtype=torch.float).scatter_(0, torch.tensor(y), value=1)
 
-class MyDataset(Dataset):
+class MNIST(Dataset):
     def __init__(self, train=True, use_emnist=False, transform=None, num_classes=10, device='cpu'):
         if transform is None:
             transform = ToTensor()
