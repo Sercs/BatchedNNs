@@ -1,5 +1,5 @@
 [project]
-name = "ai_metabolsim"
+name = "batchnn"
 version = "0.1.0"
 dependencies = [
     "numpy",

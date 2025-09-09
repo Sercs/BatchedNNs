@@ -110,7 +110,6 @@ class Trainer():
                     #print(self.state['data']['minimum_energies_l2'][-1])
                     #print(self.state['data']['energies_l0'][-1])
                     #print(self.state['data']['minimum_energies_l0'][-1])
-                    
                     test_epoch = 0
                 if stop_on_sample > 0 and sample_counter > stop_on_sample:
                     self._fire_event('after_train')

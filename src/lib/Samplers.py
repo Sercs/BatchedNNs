@@ -34,7 +34,7 @@ def ensemble_collate_fn(batch, n_streams):
 def collate_fn(n_streams):
     return partial(ensemble_collate_fn, n_streams=n_streams)
 
-class EnsembleIdenticalSampler(Sampler):
+class IdenticalSampler(Sampler):
     """
     A PyTorch Sampler used to explicitly copy items in a batch such that all
     networks view exactly the same items at exactly the same time.
@@ -63,7 +63,7 @@ class EnsembleIdenticalSampler(Sampler):
         else:
             return math.ceil(len(self.data_source) / self.batch_size)
 
-class EnsembleRandomSampler(Sampler):
+class RandomSampler(Sampler):
     """
     A PyTorch Sampler used to explicitly randomize items in a batch such that all
     networks view different items at the same time.

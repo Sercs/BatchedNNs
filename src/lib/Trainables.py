@@ -6,7 +6,8 @@ import torch.nn as nn
 import numpy as np
 import math
 
-# idiomatic but likely loops over parameters in each group
+# idiomatic but likely loops over parameters in each group.
+# custom optimizers would likely be better.
 class BatchLinearGrouped(nn.Module):
     def __init__(self, n_linears, n_in, n_out, activation=nn.Identity(), add_residual=False, n_recurs=0, init_method=None, init_config={}):
         super().__init__()
@@ -71,7 +72,8 @@ class BatchLinear(nn.Module):
             for _ in range(self.n_recurs+1):
                 x = self.activation(torch.einsum('bni,nji->bnj', x, self.weights) + self.biases)
         return x
-                  
+
+# it may be possible to make this an Observer           
 class BatchLinearMasked(nn.Module):
     def __init__(self, n_linears, n_ins, n_outs, activation=nn.Identity(), add_residual=False, n_recurs=0, init_method=None, init_config={}):
         super().__init__()
@@ -114,8 +116,8 @@ class BatchLinearMasked(nn.Module):
                 self.weight_mask[i][:n_active_out, :n_active_in] = torch.ones((n_active_out, n_active_in))
                 self.bias_mask[i][:n_active_out] = torch.ones((n_active_out,))
     
-    # since we zero out parts of the tensor we need special handling for fan_in/fan_out
-    # TODO: update with list kwargs 
+    # since we zero out parts of the tensor we need special handling for fan_in/fan_out.
+    # TODO: update with list kwargs.
     def _init_weights(self, method, **kwargs):
         if method is None:
             method = 'kaiming_uniform'

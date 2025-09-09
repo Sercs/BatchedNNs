@@ -229,7 +229,7 @@ def sampler_samples_test():
     
 #def sampler_test():
 if __name__ == '__main__':
-    DEVICE = "cpu" if torch.cuda.is_available() else "cpu"
+    DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
     N_NETWORKS = 5
     BATCH_SIZE = 16
     N_IN = 784
@@ -347,7 +347,7 @@ if __name__ == '__main__':
                                test_dataloader, 
                                trackers=trackers, 
                                device=DEVICE)
-    trainer.train_loop(0.05, 0.05, sample_increment=1)
+    trainer.train_loop(0.2, 0.05, sample_increment=1)
     file_path = os.path.join(outputs_dir, 'experiment1.json')
     trainer.save_data_as_json(file_path)
     # acc = np.array(trainer.state['data']['test_accuracies']).T

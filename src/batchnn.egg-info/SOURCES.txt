@@ -1,0 +1,16 @@
+README.md
+pyproject.toml
+src/batchnn.egg-info/PKG-INFO
+src/batchnn.egg-info/SOURCES.txt
+src/batchnn.egg-info/dependency_links.txt
+src/batchnn.egg-info/requires.txt
+src/batchnn.egg-info/top_level.txt
+src/lib/BatchLosses.py
+src/lib/DataManager.py
+src/lib/Observers.py
+src/lib/Samplers.py
+src/lib/Trainables.py
+src/lib/Trainers.py
+src/lib/Utils.py
+src/lib/__init__.py
+tests/tests.py

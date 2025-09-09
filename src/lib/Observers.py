@@ -1,9 +1,10 @@
 # TODO: previous parameters as handlers, sleep epochs, weight masking
-
+# TODO: potential optimization with CPU/GPU syncing
 import torch
 import numpy as np
 import time
 """
+    PyTorch-Lightning inspired.
     Observers represent any code you'd want to run during training but not
     necessarily during every training run you implement. They listen for 
     functions called in the main training loop to make modifications or 

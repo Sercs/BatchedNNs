@@ -1,4 +1,6 @@
 tests/datasets
 tests/data
+scripts/data
+scripts/datasets
 
 *.json
