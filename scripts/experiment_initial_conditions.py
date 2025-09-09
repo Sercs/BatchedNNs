@@ -22,7 +22,7 @@ import sys
 if __name__ == '__main__':
     DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
     
-    RESOLUTION = 3
+    RESOLUTION = 25
     INIT1_RANGE = np.logspace(np.log10(0.0005), np.log10(0.1), RESOLUTION)
     INIT2_RANGE = np.logspace(np.log10(0.0005), np.log10(1), RESOLUTION)
     
@@ -30,7 +30,7 @@ if __name__ == '__main__':
     LAYER1_INIT = LAYER1_INIT.reshape(-1)
     LAYER2_INIT = LAYER2_INIT.reshape(-1)
 
-    N_NETWORKS = 10# len(LAYER1_INIT)
+    N_NETWORKS = len(LAYER1_INIT)
     N_IN = 784
     N_HID = 100
     N_OUT = 10
@@ -80,9 +80,8 @@ if __name__ == '__main__':
                                                         init_config={'a' : -0.1,
                                                                      'b' : 0.1})).to(DEVICE)
     
-    optimizer = torch.optim.SGD(model.parameters(), 
-                                       lr=0.01) # works with torch optim
-    criterion1 = batch_losses.CrossEntropyLoss(per_sample=True, reduction='mean') # note batch losses
+    optimizer = torch.optim.SGD(model.parameters(), lr=0.01) # works with torch optim
+    criterion1 = batch_losses.CrossEntropyLoss(per_sample=True, reduction='mean') # note batch_losses
     
     previous_param_provider = interceptors.PreviousParameterProvider()
     trackers = [interceptors.Data(),  #      name of test loop 
