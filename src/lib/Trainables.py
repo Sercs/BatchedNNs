@@ -5,45 +5,7 @@ import torch.nn as nn
 
 import numpy as np
 import math
-
-# idiomatic but likely loops over parameters in each group.
-# custom optimizers would likely be better.
-class BatchLinearGrouped(nn.Module):
-    def __init__(self, n_linears, n_in, n_out, activation=nn.Identity(), add_residual=False, n_recurs=0, init_method=None, init_config={}):
-        super().__init__()
-        self.n_linears = n_linears
-        self.n_in, self.n_out = n_in, n_out
-        self.activation = activation
-        
-        if add_residual:
-            assert n_in == n_out, 'Expected input dims == output dims when using residuals'
-        self.add_residual = add_residual
-        
-        if n_recurs > 0:
-            assert n_in == n_out, 'Expected input dims == output dims when using recurrents'
-        self.n_recurs = n_recurs
-
-        self.weights = nn.ParameterList(
-                [nn.Parameter(torch.empty((n_out, n_in))) for _ in range(n_linears)]
-            )
-        
-        self.biases = nn.ParameterList(
-                [nn.Parameter(torch.zeros((n_out, ))) for _ in range(n_linears)]
-            )
-        
-        _init_weights(self.weights, init_method, **init_config)
-                
-    def forward(self, x):
-        W = torch.stack(list(self.weights))
-        b = torch.stack(list(self.biases))
-        if self.add_residual:
-            for _ in range(self.n_recurs+1):
-                x = x + self.activation(torch.einsum('bni,nji->bnj', x, W) + b)
-        else:
-            for _ in range(self.n_recurs+1):
-                x = self.activation(torch.einsum('bni,nji->bnj', x, W) + b)
-        return x
-    
+ 
 class BatchLinear(nn.Module):
     def __init__(self, n_linears, n_in, n_out, activation=nn.Identity(), add_residual=False, n_recurs=0, init_method=None, init_config={}):
         super().__init__()

@@ -30,7 +30,7 @@ if __name__ == '__main__':
     LAYER1_INIT = LAYER1_INIT.reshape(-1)
     LAYER2_INIT = LAYER2_INIT.reshape(-1)
 
-    N_NETWORKS = 9# len(LAYER1_INIT)
+    N_NETWORKS = 10# len(LAYER1_INIT)
     N_IN = 784
     N_HID = 100
     N_OUT = 10
@@ -61,32 +61,32 @@ if __name__ == '__main__':
                                                       # tracking indices is non-standard default PyTorch 
 
     train_dataloader = DataLoader(train,
-                              num_workers=4,
+                              num_workers=0,
                               batch_sampler=s, # required
                               collate_fn=general_collate) # required
 
     test_dataloader = DataLoader(test,
-                              batch_size=16,
-                              num_workers=4,
+                              batch_size=4096,
+                              num_workers=0,
                               shuffle=False)
     
     model = nn.Sequential(trainables.BatchLinear(N_NETWORKS, N_IN, N_HID, 
                                                         activation=nn.GELU(),
                                                         init_method='uniform',
-                                                        init_config={'a' : -0.1,   # lower bound (also works with lists)
-                                                                     'b' : 0.1}),  # higher bound
+                                                        init_config={'a' : -0.01,   # lower bound (also works with lists)
+                                                                     'b' : 0.01}),  # higher bound
                           trainables.BatchLinear(N_NETWORKS, N_HID, N_OUT,
                                                         init_method='uniform',
                                                         init_config={'a' : -0.1,
                                                                      'b' : 0.1})).to(DEVICE)
     
-    optimizer = batch_optimizers.LazyAdamW(model.parameters(), 
-                                       lr=0.0001) # works with torch optim
-    criterion1 = batch_losses.LazyLoss(batch_losses.CrossEntropyLoss(per_sample=True, reduction='mean')) # note batch losses
+    optimizer = torch.optim.SGD(model.parameters(), 
+                                       lr=0.01) # works with torch optim
+    criterion1 = batch_losses.CrossEntropyLoss(per_sample=True, reduction='mean') # note batch losses
     
     previous_param_provider = interceptors.PreviousParameterProvider()
     trackers = [interceptors.Data(),  #      name of test loop 
-                                   #            |
+                                      #            |
                 interceptors.TestingLossTracker(['test'], ['MSELoss']), # <- name of criterion(s) used in test loop
                 interceptors.Timer(), # tracks time
                 interceptors.TestingAccuracyTracker(['test']),
@@ -113,7 +113,7 @@ if __name__ == '__main__':
                                test_dataloader, 
                                trackers=trackers, 
                                device=DEVICE)
-    trainer.train_loop(0.05, 0.01)
+    trainer.train_loop(0.1, 0.01)
     plt.figure(dpi=240)
     # function to grab indices that meet a condition in one array and use those indices to pull data from another array
     res = pluck_masked_values(np.array(trainer.state['data']['test_accuracies']['test']), # filter from

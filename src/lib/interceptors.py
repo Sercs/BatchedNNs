@@ -1,4 +1,5 @@
-# TODO: previous parameters as handlers, sleep epochs, weight masking
+# TODO: sleep epochs
+# TODO [minor]: weight masking, providers as handlers, std
 # TODO: potential optimization with CPU/GPU syncing
 import torch
 import numpy as np
