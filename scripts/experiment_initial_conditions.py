@@ -73,16 +73,17 @@ if __name__ == '__main__':
     model = nn.Sequential(trainables.BatchLinear(N_NETWORKS, N_IN, N_HID, 
                                                         activation=nn.GELU(),
                                                         init_method='uniform',
-                                                        init_config={'a' : -1,   # lower bound (also works with lists)
-                                                                     'b' : 1}),  # higher bound
+                                                        init_config={'a' : -0.1,   # lower bound (also works with lists)
+                                                                     'b' : 0.1}),  # higher bound
                           trainables.BatchLinear(N_NETWORKS, N_HID, N_OUT,
                                                         init_method='uniform',
-                                                        init_config={'a' : -1,
-                                                                     'b' : 1})).to(DEVICE)
+                                                        init_config={'a' : -0.1,
+                                                                     'b' : 0.1})).to(DEVICE)
     
-    optimizer = torch.optim.AdamW(model.parameters(), 
-                                       lr=0.0001) # works with torch optim
-    criterion1 = batch_losses.CrossEntropyLoss(per_sample=True, reduction='mean') # note batch losses
+    optimizer = batch_optimizers.LazyAdamW(model.parameters(), 
+                                       lr=0.0001,
+                                       weight_decay=np.linspace(0.0, 0.99, N_NETWORKS)) # works with torch optim
+    criterion1 = batch_losses.LazyLoss(batch_losses.CrossEntropyLoss(per_sample=True, reduction='mean')) # note batch losses
     
     previous_param_provider = interceptors.PreviousParameterProvider()
     trackers = [interceptors.Data(),  #      name of test loop 
