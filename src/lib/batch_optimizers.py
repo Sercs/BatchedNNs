@@ -271,8 +271,11 @@ class LazyAdamW(torch.optim.Optimizer):
                 
                 param_state['step'] += 1
                 
+                
+                update_needed = (grad.sum(dim=tuple(range(1, p.ndim))) > 0).view(-1, *[1] * (p.ndim - 1))
+                
                 if not isinstance(weight_decay, float) or weight_decay != 0.0:
-                    p.mul_(1.0 - lr * weight_decay)
+                    p.mul_(1.0 - lr * weight_decay * update_needed)
                 
                 # first moment estimate (m_t)
                 exp_avg.mul_(beta1).add_(grad * (1 - beta1)) # alpha expects a scalar but beta1 might be a list
@@ -297,8 +300,7 @@ class LazyAdamW(torch.optim.Optimizer):
                 
                 corrected_exp_avg.mul_(step_size)
                 
-                update_needed = (grad.sum(dim=tuple(range(1, p.ndim))) > 0).view(-1, *[1] * (p.ndim - 1))
+                # which networks actually have gradients and therefore require updating
                 corrected_exp_avg.mul_(update_needed)
                 p.addcdiv_(corrected_exp_avg, denom, value=-1) 
 
-# TODO: LazyAdamW which avoids updates on networks that skip

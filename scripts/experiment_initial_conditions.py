@@ -81,8 +81,7 @@ if __name__ == '__main__':
                                                                      'b' : 0.1})).to(DEVICE)
     
     optimizer = batch_optimizers.LazyAdamW(model.parameters(), 
-                                       lr=0.0001,
-                                       weight_decay=np.linspace(0.0, 0.99, N_NETWORKS)) # works with torch optim
+                                       lr=0.0001) # works with torch optim
     criterion1 = batch_losses.LazyLoss(batch_losses.CrossEntropyLoss(per_sample=True, reduction='mean')) # note batch losses
     
     previous_param_provider = interceptors.PreviousParameterProvider()
