@@ -40,13 +40,13 @@ if __name__ == '__main__':
     ])
     
     train_dataset = datasets.MNIST(root='datasets',
-                             #split='digits', # used as a quick swap for EMNIST
+                                #split='digits', # used as a quick swap for EMNIST
                                 train=True,
                                 download=True,
                                 transform=transform, # automatically coverts 0 - 255 --> 0 - 1
                                 target_transform=dm.temp_onehot)
     test_dataset = datasets.MNIST(root='datasets',
-                             #split='digits', # used as a quick swap for EMNIST
+                                #split='digits', # used as a quick swap for EMNIST
                                 train=False,
                                 download=True,
                                 transform=transform, # automatically coverts 0 - 255 --> 0 - 1
@@ -61,9 +61,8 @@ if __name__ == '__main__':
 
     train_dataloader = DataLoader(train,
                               num_workers=4,
-                              batch_sampler=s,
-                              pin_memory=True,
-                              collate_fn=general_collate)
+                              batch_sampler=s, # required
+                              collate_fn=general_collate) # required
 
     test_dataloader = DataLoader(test,
                               batch_size=16,
@@ -73,15 +72,15 @@ if __name__ == '__main__':
     model = nn.Sequential(Trainables.BatchLinear(N_NETWORKS, N_IN, N_HID, 
                                                         activation=nn.GELU(),
                                                         init_method='uniform',
-                                                        init_config={'a' : -1, # works with lists
-                                                                     'b' : 1}),
+                                                        init_config={'a' : -LAYER1_INIT,   # lower bound (also works with lists)
+                                                                     'b' : LAYER1_INIT}),  # higher bound
                           Trainables.BatchLinear(N_NETWORKS, N_HID, N_OUT,
                                                         init_method='uniform',
-                                                        init_config={'a' : -1,
-                                                                     'b' : 1})).to(DEVICE)
+                                                        init_config={'a' : -LAYER2_INIT,
+                                                                     'b' : LAYER2_INIT})).to(DEVICE)
     
-    optimizer = torch.optim.SGD(model.parameters(), lr=0.01)
-    criterion1 = BatchLosses.CrossEntropyLoss(per_sample=True, reduction='mean')
+    optimizer = torch.optim.SGD(model.parameters(), lr=0.01) # works with torch optim
+    criterion1 = BatchLosses.CrossEntropyLoss(per_sample=True, reduction='mean') # note batch losses
     
     previous_param_provider = Observers.PreviousParameterProvider()
     trackers = [Observers.Data(),  #      name of test loop 
@@ -89,13 +88,13 @@ if __name__ == '__main__':
                 Observers.TestingLossTracker(['test'], ['MSELoss']), # <- name of criterion(s) used in test loop
                 Observers.Timer(), # tracks time
                 Observers.TestingAccuracyTracker(['test']),
-                previous_param_provider,
+                previous_param_provider, # <- should be listed before other modules that require it
                 Observers.TestLoop('test', # <- name of test loop used above
                                    test_dataloader, 
-                                            # name of criterion used above        # per_sample is used for training
-                                            #      |                              # sum used since we want average 
-                                            #      |                              # sample and this may change with
-                                            #      |                              # batch size
+                                                                                  # per_sample is used for training
+                                                                                  # sum used since we want average 
+                                      #  name of criterion used above             # sample and this may change with
+                                      #           |                               # batch size
                                    criterions={'MSELoss' : BatchLosses.MSELoss(per_sample=False, reduction='sum')}, 
                                    device=DEVICE),
                 # we attach the module keeping track of params (saves memory use with other trackers)
@@ -114,6 +113,7 @@ if __name__ == '__main__':
                                device=DEVICE)
     trainer.train_loop(3.0, 0.01)
     plt.figure(dpi=240)
+    # function to grab indices that meet a condition in one array and use those indices to pull data from another array
     res = pluck_masked_values(np.array(trainer.state['data']['test_accuracies']['test']).T, # filter from
                               np.array(trainer.state['data']['energies_l1']).T, # fetch idx at filter
                               lambda x : x > 9000) # find first value over 9000 (i.e. 90% test accuracy)
