@@ -73,12 +73,13 @@ if __name__ == '__main__':
     model = nn.Sequential(trainables.BatchLinear(N_NETWORKS, N_IN, N_HID, 
                                                         activation=nn.GELU(),
                                                         init_method='uniform',
-                                                        init_config={'a' : -0.01,   # lower bound (also works with lists)
-                                                                     'b' : 0.01}),  # higher bound
+                                                        init_config={'a' : -INIT1_RANGE,   # lower bound (also works with lists)
+                                                                     'b' : INIT1_RANGE}),  # higher bound
                           trainables.BatchLinear(N_NETWORKS, N_HID, N_OUT,
                                                         init_method='uniform',
-                                                        init_config={'a' : -0.1,
-                                                                     'b' : 0.1})).to(DEVICE)
+                                                        init_config={'a' : -INIT2_RANGE,
+                                                                     'b' : INIT2_RANGE})
+                          ).to(DEVICE)
     
     optimizer = torch.optim.SGD(model.parameters(), lr=0.01) # works with torch optim
     criterion1 = batch_losses.CrossEntropyLoss(per_sample=True, reduction='mean') # note batch_losses
@@ -120,7 +121,7 @@ if __name__ == '__main__':
                               lambda x : x > 9000) # find first value over 9000 (i.e. 90% test accuracy)
     plt.contourf(LAYER1_INIT.reshape(RESOLUTION, RESOLUTION), 
                  LAYER2_INIT.reshape(RESOLUTION, RESOLUTION), 
-                 res.reshape(RESOLUTION, RESOLUTION), 
+                 np.array(trainer.state['data']['test_accuracies']['test'])[-1].reshape(RESOLUTION, RESOLUTION), 
                  levels=10, 
                  cmap='viridis')
     plt.xlabel('Layer 1 Initialization Range')
