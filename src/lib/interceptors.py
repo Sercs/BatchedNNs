@@ -73,15 +73,6 @@ class Handler:
     def before_step_log(self, state=None): pass
     def after_step_log(self, state=None): pass
 
-################################ DATA ##################################
-"""
-The main Interceptor for storing any data. Any and all Interceptors when 
-necessary save data to state['data'].
-""" 
-class Data(Interceptor): 
-    def before_train(self, state):
-        state['data'] = {}
-
 ############################## TEST LOOP ##################################
 """
 An optional test loop. It expects a name which indicates which test is being done
@@ -183,27 +174,28 @@ class RunningLossTracker(Interceptor):
         state['data']['running_losses'].append(self.train_loss_accumulator.clone().numpy())
         self.train_loss_accumulator = torch.zeros((state['n_networks'],))
 
+# TODO: make testing tracking only store arrays for criterions associated with particular test loops
 class TestingLossTracker(Interceptor):
-    def __init__(self, test_names, criterion_names):
+    def __init__(self, test_criterion_map):
         super().__init__()
-        if type(test_names) is not list:
-            test_names = [test_names]
-
-        if type(criterion_names) is not list:
-            criterion_names = [criterion_names]
+        if not isinstance(test_criterion_map, dict):
+            raise TypeError("test_criterion_map must be a dictionary.")
             
-        self.criterion_names = criterion_names
-        self.test_names = test_names
+        self.test_criterion_map = test_criterion_map
+        self.test_names = list(self.test_criterion_map.keys())
+        for test in self.test_names:
+            if type(self.test_criterion_map[test]) is str:
+                self.test_criterion_map[test] = [self.test_criterion_map[test]]
 
     def before_train(self, state):
         self.test_losses = {
-            name: {crit: torch.zeros((state['n_networks'],)) for crit in self.criterion_names}
-            for name in self.test_names
+            test_name: {crit: torch.zeros((state['n_networks'],)) for crit in crit_list}
+            for test_name, crit_list in self.test_criterion_map.items()
         }
         
         state['data']['test_losses'] = {
-            name: {crit: [] for crit in self.criterion_names}
-            for name in self.test_names
+            test_name: {crit: [] for crit in crit_list}
+            for test_name, crit_list in self.test_criterion_map.items()
         }
 
     def after_test_forward(self, state):
@@ -211,8 +203,9 @@ class TestingLossTracker(Interceptor):
         if current_test_name in self.test_names:
             losses = state[f'{current_test_name}_losses']
             for criterion_name in losses:
-                loss_value = losses[criterion_name]
-                self.test_losses[current_test_name][criterion_name] += loss_value.clone().detach().cpu()
+                if criterion_name in self.test_criterion_map[current_test_name]:
+                    loss_value = losses[criterion_name]
+                    self.test_losses[current_test_name][criterion_name] += loss_value.clone().detach().cpu()
 
     def after_test(self, state):
         for test_name in self.test_losses:
@@ -222,8 +215,9 @@ class TestingLossTracker(Interceptor):
             self._reset_test(test_name, state)
             
     def _reset_test(self, test_name, state):
+        specific_criteria = self.test_criterion_map[test_name]
         self.test_losses[test_name] = {
-            crit: torch.zeros((state['n_networks'],)) for crit in self.criterion_names
+            crit: torch.zeros((state['n_networks'],)) for crit in specific_criteria
         }
 
 class RunningAccuracyTracker(Interceptor):
@@ -458,7 +452,9 @@ class PerSampleBackwardCounter(Interceptor):
     def after_train(self, state):
         state['data']['per_sample_backward_counts'] = self.per_sample_backward_counts.clone().numpy()
 
-# TODO: make batch optimizers
+# TODO: make batch optimizers [Done!]
+# This is now performed by batch_optimizers
+#              |
 class PerNetworkLearningRate(Interceptor):
     def __init__(self, lr_scales):
         super().__init__()

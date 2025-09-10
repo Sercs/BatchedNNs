@@ -84,9 +84,9 @@ if __name__ == '__main__':
     criterion1 = batch_losses.CrossEntropyLoss(per_sample=True, reduction='mean') # note batch_losses
     
     previous_param_provider = interceptors.PreviousParameterProvider()
-    trackers = [interceptors.Data(),  #      name of test loop 
+                                      #      name of test loop 
                                       #            |
-                interceptors.TestingLossTracker(['test'], ['MSELoss']), # <- name of criterion(s) used in test loop
+    trackers = [interceptors.TestingLossTracker({'test' : 'MSELoss'}), # <- name of criterion(s) used in test loop
                 interceptors.Timer(), # tracks time
                 interceptors.TestingAccuracyTracker(['test']),
                 previous_param_provider, # <- should be listed before other modules that require it

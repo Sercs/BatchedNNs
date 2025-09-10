@@ -94,12 +94,12 @@ class Trainer():
                 test_epoch += test_step
                 self._fire_event('before_update') # I like to use this for logging initializations
                 step_loss, step_accuracy = self.train_step(x, y, idx)
-                self.state['running_loss'] = step_loss.detach().cpu() * batch_size # multiply by batch size since we average
+                self.state['running_loss'] = step_loss.detach().cpu() # multiply by batch size since we average
                 self.state['running_accuracy'] = step_accuracy.detach().cpu()
                 self._fire_event('after_update') 
                 if test_epoch >= test_interval: # TODO: it may be possible to avoid this check and instead 
                                                 #       have interceptors that need it look for a state['count']
-                    print(test_epoch)            
+                    print("Forward passes since last test:", test_epoch)            
                     self._fire_event('before_test') # initialization stuff usually
                     self._fire_event('on_test_run') # used primarily by the test loop 
                     self._fire_event('after_test')  # typically for recording metrics
@@ -107,7 +107,6 @@ class Trainer():
                     # quick prints for stats
                     # TODO: probably could make an interceptor print all the data we want
                     print(self.state['data']['time_taken'][-1])
-                    print(self.state['data']['test_accuracies']['test'][-1])
                     #print(self.state['data']['energies_l1_layerwise'])
                     #print(self.state['data']['minimum_energies_l1_layerwise'])
                     #print(self.state['data']['energies_l1'][-1])
