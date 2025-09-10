@@ -22,8 +22,8 @@ import sys
 if __name__ == '__main__':
     DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
     
-    RESOLUTION = 10
-    INIT1_RANGE = np.logspace(np.log10(0.0005), np.log10(0.1), RESOLUTION)
+    RESOLUTION = 50
+    INIT1_RANGE = np.logspace(np.log10(0.0005), np.log10(0.2), RESOLUTION)
     INIT2_RANGE = np.logspace(np.log10(0.0005), np.log10(1), RESOLUTION)
     
     LAYER1_INIT, LAYER2_INIT = np.meshgrid(INIT1_RANGE, INIT2_RANGE)
@@ -61,28 +61,28 @@ if __name__ == '__main__':
                                                       # tracking indices is non-standard default PyTorch 
 
     train_dataloader = DataLoader(train,
-                              num_workers=0,
+                              num_workers=4,
                               batch_sampler=s, # required
                               collate_fn=general_collate) # required
 
     test_dataloader = DataLoader(test,
-                              batch_size=4096,
-                              num_workers=0,
+                              batch_size=64,
+                              num_workers=4,
                               shuffle=False)
     
     model = nn.Sequential(trainables.BatchLinear(N_NETWORKS, N_IN, N_HID, 
                                                         activation=nn.GELU(),
                                                         init_method='uniform',
-                                                        init_config={'a' : -INIT1_RANGE,   # lower bound (also works with lists)
-                                                                     'b' : INIT1_RANGE}),  # higher bound
+                                                        init_config={'a' : -LAYER1_INIT,   # lower bound (also works with lists)
+                                                                     'b' : LAYER1_INIT}),  # higher bound
                           trainables.BatchLinear(N_NETWORKS, N_HID, N_OUT,
                                                         init_method='uniform',
-                                                        init_config={'a' : -INIT2_RANGE,
-                                                                     'b' : INIT2_RANGE})
+                                                        init_config={'a' : -LAYER2_INIT,
+                                                                     'b' : LAYER2_INIT})
                           ).to(DEVICE)
     
     optimizer = torch.optim.SGD(model.parameters(), lr=0.01) # works with torch optim
-    criterion1 = batch_losses.CrossEntropyLoss(per_sample=True, reduction='mean') # note batch_losses
+    criterion1 = batch_losses.MSELoss(per_sample=True, reduction='mean') # note batch_losses
     
     previous_param_provider = interceptors.PreviousParameterProvider()
                                       #      name of test loop 
@@ -113,7 +113,7 @@ if __name__ == '__main__':
                                test_dataloader, 
                                trackers=trackers, 
                                device=DEVICE)
-    trainer.train_loop(0.1, 0.01)
+    trainer.train_loop(3.0, 0.01)
     plt.figure(dpi=240)
     # function to grab indices that meet a condition in one array and use those indices to pull data from another array
     res = pluck_masked_values(np.array(trainer.state['data']['test_accuracies']['test']), # filter from
