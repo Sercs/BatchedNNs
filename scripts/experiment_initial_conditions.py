@@ -22,7 +22,7 @@ import sys
 if __name__ == '__main__':
     DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
     
-    RESOLUTION = 25
+    RESOLUTION = 10
     INIT1_RANGE = np.logspace(np.log10(0.0005), np.log10(0.1), RESOLUTION)
     INIT2_RANGE = np.logspace(np.log10(0.0005), np.log10(1), RESOLUTION)
     
