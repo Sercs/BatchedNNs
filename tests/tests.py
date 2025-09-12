@@ -1,5 +1,5 @@
-from lib import Trainables, Trainers, Observers, DataManager, BatchLosses, Samplers
-from lib import DataManager as dm
+from lib import trainables, trainers, interceptors, batch_losses, batch_optimizers, samplers
+from lib import data_manager as dm
 
 import time
 import torch
@@ -48,7 +48,7 @@ def linear_batch_forward_shape():
         #                      V
     x = torch.ones(batch_size, 1, n_in)
     
-    l = Trainables.BatchLinear(n_linears, n_in, n_out, init_config={'a' : 5, 'clone' : True})
+    l = trainables.BatchLinear(n_linears, n_in, n_out, init_config={'a' : 5, 'clone' : True})
     y = l(x) # (batch_size, n_linears, n_in) -> (batch_size, n_linears, n_out)
     
     return y.shape == (batch_size, n_linears, n_out)
@@ -64,7 +64,7 @@ def linear_batch_no_group_forward_shape():
         #                      V
     x = torch.ones(batch_size, 1, n_in)
     
-    l = Trainables.BatchLinearNoGroup(n_linears, n_in, n_out, init_method='normal', init_config={'mean' : 0.0, 'std' : 0.001})
+    l = trainables.BatchLinearNoGroup(n_linears, n_in, n_out, init_method='normal', init_config={'mean' : 0.0, 'std' : 0.001})
     y = l(x) # (batch_size, n_linears, n_in) -> (batch_size, n_linears, n_out)
     
     return y.shape == (batch_size, n_linears, n_out)
@@ -84,11 +84,11 @@ def linear_batch_masked_forward_shape():
         #                      V
     x = torch.ones(batch_size, 1, n_in)
     
-    l1 = Trainables.BatchLinearMasked(n_linears, n_ins, n_outs, init_method='normal')
+    l1 = trainables.BatchLinearMasked(n_linears, n_ins, n_outs, init_method='normal')
     y1 = l1(x) # (batch_size, n_linears, n_in) -> (batch_size, n_linears, n_out)
     #print(y1)
     
-    l2 = Trainables.BatchLinearMasked(n_linears, n_outs, n_finals, init_method='normal')
+    l2 = trainables.BatchLinearMasked(n_linears, n_outs, n_finals, init_method='normal')
     y2 = l2(y1)
     
     print(y2.mean((0, -1)).shape)
@@ -156,26 +156,26 @@ def train_test():
                               batch_size=1_000,
                               shuffle=False)
     
-    model = nn.Sequential(Trainables.BatchLinearNoGroup(N_NETWORKS, N_IN, N_HID, 
+    model = nn.Sequential(trainables.BatchLinearNoGroup(N_NETWORKS, N_IN, N_HID, 
                                                         activation=nn.GELU(),
                                                         init_method='uniform',
                                                         init_config={'a' : -INIT_RANGE, 
                                                                      'b' : INIT_RANGE}),
-                          Trainables.BatchLinearNoGroup(N_NETWORKS, N_HID, N_OUT)).to(DEVICE)
+                          trainables.BatchLinearNoGroup(N_NETWORKS, N_HID, N_OUT)).to(DEVICE)
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
-    criterion = BatchLosses.CrossEntropyLoss()
+    criterion = batch_losses.CrossEntropyLoss()
     
-    handlers = [Observers.EnergyL1NetworkHandler(), Observers.EnergyL2NetworkHandler()]
-    trackers = [Observers.Data(), 
-                Observers.LossTracker(), 
-                Observers.AccuracyTracker(),
-                #Observers.EnergyL1NetworkTracker(),
-                #Observers.EnergyL2NetworkTracker()]
-                Observers.ParameterIterator(handlers=handlers)]
+    handlers = [interceptors.EnergyL1NetworkHandler(), interceptors.EnergyL2NetworkHandler()]
+    trackers = [interceptors.Data(), 
+                interceptors.LossTracker(), 
+                interceptors.AccuracyTracker(),
+                #interceptors.EnergyL1NetworkTracker(),
+                #interceptors.EnergyL2NetworkTracker()]
+                interceptors.ParameterIterator(handlers=handlers)]
     
     s=time.time()
-    trainer = Trainers.Trainer(model, 
+    trainer = trainers.Trainer(model, 
                                N_NETWORKS, 
                                optimizer, 
                                criterion, 
@@ -210,13 +210,13 @@ def sampler_samples_test():
     
     train = dm.DatasetWithIdx(train_dataset, task='classify')
 
-    s=Samplers.VaryBatchAndDatasetSizeSampler(
+    s=samplers.VaryBatchAndDatasetSizeSampler(
         train, N_NETWORKS, dataset_sizes=[1, 2, 4, 8], 
         batch_sizes=1, 
         method='stretch',
         order='random'
     )
-    general_collate = partial(Samplers.ensemble_collate_fn, num_networks=N_NETWORKS)
+    general_collate = partial(samplers.ensemble_collate_fn, num_networks=N_NETWORKS)
     samples_used = s.get_samples_per_network()
     train_dataloader = DataLoader(train,
                                   #batch_size=1)
@@ -258,13 +258,13 @@ if __name__ == '__main__':
     train = dm.DatasetWithIdx(train_dataset, task='classify')
     test = dm.DatasetWithIdx(test_dataset, task='classify')
     
-    s=Samplers.VaryBatchAndDatasetSizeSampler(
+    s=samplers.VaryBatchAndDatasetSizeSampler(
         train, N_NETWORKS, dataset_sizes=[60_000, 60_000, 60_000, 60_000, 60_000], 
         batch_sizes=[1, 1, 1, 1, 1], 
         method='loop',
         order='identical'
     )
-    general_collate = Samplers.collate_fn(N_NETWORKS)
+    general_collate = samplers.collate_fn(N_NETWORKS)
     
     samples_used = s.get_samples_per_network()
 
@@ -284,62 +284,73 @@ if __name__ == '__main__':
                               num_workers=4,
                               shuffle=False)
     
-    model = nn.Sequential(Trainables.BatchLinear(N_NETWORKS, N_IN, N_HID, 
+    model = nn.Sequential(trainables.BatchLinear(N_NETWORKS, N_IN, N_HID, 
                                                         activation=nn.GELU(),
                                                         init_method='uniform',
                                                         init_config={'a' : -1/np.sqrt(784),
                                                                      'b' : 1/np.sqrt(784),
                                                                      'clone' : True}),
-                          Trainables.BatchLinear(N_NETWORKS, N_HID, N_OUT,
+                          trainables.BatchLinear(N_NETWORKS, N_HID, N_OUT,
                                                         init_method='uniform',
                                                         init_config={'a' : -1/np.sqrt(100),
                                                                      'b' : 1/np.sqrt(100),
                                                                      'clone' : True})).to(DEVICE)
     
-    optimizer = torch.optim.SGD(model.parameters(), lr=1)
-    criterion1 = BatchLosses.MSELoss(per_sample=True, reduction='mean')
+    optimizer = torch.optim.SGD(model.parameters(), lr=0.01)
+    criterion1 = batch_losses.MSELoss(per_sample=True, reduction='mean')
     
-    previous_param_provider = Observers.PreviousParameterProvider()
-    initial_param_provider = Observers.InitialParameterProvider()
-    prev_prev_param_provider = Observers.PreviousPreviousParameterProvider(previous_param_provider)
-    handlers = [Observers.EnergyL2NeuronwiseHandler(previous_param_provider, ['incoming', 'outgoing']), 
-                Observers.MinimumEnergyL2NeuronwiseHandler(initial_param_provider, ['incoming', 'outgoing']),
-                Observers.EnergyL2LayerwiseHandler(previous_param_provider),
-                Observers.MinimumEnergyL2LayerwiseHandler(initial_param_provider)]
+    previous_param_provider = interceptors.PreviousParameterProvider()
+    initial_param_provider = interceptors.InitialParameterProvider()
+    prev_prev_param_provider = interceptors.PreviousPreviousParameterProvider(previous_param_provider)
+    # handlers = [interceptors.EnergyL2NeuronwiseHandler(previous_param_provider, ['incoming', 'outgoing']), 
+    #             interceptors.MinimumEnergyL2NeuronwiseHandler(initial_param_provider, ['incoming', 'outgoing']),
+    #             interceptors.EnergyL2LayerwiseHandler(previous_param_provider),
+    #             interceptors.MinimumEnergyL2LayerwiseHandler(initial_param_provider),
+    #             interceptors.MinimumEnergyL2NetworkHandler(initial_param_provider),
+    #             interceptors.EnergyL2NetworkHandler(previous_param_provider),
+                
+    #             interceptors.EnergyL1NeuronwiseHandler(previous_param_provider, ['incoming', 'outgoing']), 
+    #             interceptors.MinimumEnergyL1NeuronwiseHandler(initial_param_provider, ['incoming', 'outgoing']),
+    #             interceptors.EnergyL1LayerwiseHandler(previous_param_provider),
+    #             interceptors.MinimumEnergyL1LayerwiseHandler(initial_param_provider),
+    #             interceptors.MinimumEnergyL1NetworkHandler(initial_param_provider),
+    #             interceptors.EnergyL1NetworkHandler(previous_param_provider),
+                
+    #             interceptors.MinimumEnergyL0NetworkHandler(initial_param_provider),
+    #             interceptors.EnergyL0NetworkHandler()]
     
-    trackers = [Observers.Data(), 
-                Observers.RunningLossTracker(),
-                Observers.RunningAccuracyTracker(),
-                Observers.TestingLossTracker(['test'], ['MSELoss']),
-                Observers.Timer(),
-                Observers.ForwardItemCounter(),
-                Observers.ForwardPassCounter(),
-                Observers.TestingAccuracyTracker(['test']),
+    trackers = [interceptors.TestingLossTracker({'test': ['MSELoss']}),
+                interceptors.Timer(),
+                interceptors.TestingAccuracyTracker(['test']),
                 prev_prev_param_provider,
                 previous_param_provider,
                 initial_param_provider,
-                Observers.L1Regularizer([0.0, 1e-6, 1e-5, 1e-4, 1e-3], prev_prev_param_provider),
-                Observers.BackwardPassCounter(),
-                Observers.BackwardItemCounter(),
-                Observers.PerSampleBackwardCounter(60_000),
-                Observers.PerNetworkLearningRate([0.01, 0.01, 0.01, 0.01, 0.01]),
-                Observers.TestLoop('test', 
+                interceptors.TestLoop('test', 
                                    test_dataloader, 
-                                   criterions={'MSELoss' : BatchLosses.MSELoss(per_sample=False, 
+                                   criterions={'MSELoss' : batch_losses.MSELoss(per_sample=False, 
                                                                                                  reduction='sum')}, 
                                    device=DEVICE),
-                Observers.EnergyL1NetworkTracker(previous_param_provider), # need handlers too
-                #Observers.MinimumEnergyL1NeuronwiseTracker(initial_param_provider, ['incoming', 'outgoing']),
-                #Observers.EnergyL2NetworkTracker(previous_param_provider),
-                Observers.MinimumEnergyL1NetworkTracker(initial_param_provider)]
-                #Observers.MinimumEnergyL2NetworkTracker(initial_param_provider)]
-                #Observers.ParameterIterator(handlers=handlers)]
+                interceptors.EnergyL1NetworkTracker(previous_param_provider), # need handlers too
+                interceptors.MinimumEnergyL1NetworkTracker(initial_param_provider),
+                
+                interceptors.EnergyL1LayerwiseTracker(previous_param_provider),
+                interceptors.MinimumEnergyL1LayerwiseTracker(initial_param_provider),
+                
+                interceptors.EnergyL1NeuronwiseTracker(previous_param_provider, ['incoming', 'outgoing']),
+                interceptors.MinimumEnergyL1NeuronwiseTracker(initial_param_provider, ['incoming', 'outgoing']),
+                
+                interceptors.EnergyL2NetworkTracker(previous_param_provider),
+                interceptors.MinimumEnergyL2NetworkTracker(initial_param_provider),
+                
+                
+                interceptors.MinimumEnergyL0NetworkTracker(initial_param_provider),
+                interceptors.EnergyL0NetworkTracker()]
     
     s=time.time()
     
     #print(list(model.parameters()))
     
-    trainer = Trainers.Trainer(model, 
+    trainer = trainers.Trainer(model, 
                                N_NETWORKS, 
                                optimizer, 
                                criterion1, 
@@ -347,7 +358,7 @@ if __name__ == '__main__':
                                test_dataloader, 
                                trackers=trackers, 
                                device=DEVICE)
-    trainer.train_loop(0.2, 0.05, sample_increment=1)
+    trainer.train_loop(0.05, 0.01, sample_increment=1)
     file_path = os.path.join(outputs_dir, 'experiment1.json')
     trainer.save_data_as_json(file_path)
     # acc = np.array(trainer.state['data']['test_accuracies']).T
@@ -364,39 +375,39 @@ if __name__ == '__main__':
     #     plt.plot(acc[line], color=pal(line))
     # plt.show()
     ## BP ##
-    # model = nn.Sequential(Trainables.BatchLinearNoGroup(N_NETWORKS, N_IN, N_HID, 
+    # model = nn.Sequential(trainables.BatchLinearNoGroup(N_NETWORKS, N_IN, N_HID, 
     #                                                     activation=nn.GELU(),
     #                                                     init_method='uniform',
     #                                                     init_config={'a' : -0.005,
     #                                                                  'b' : 0.005,
     #                                                                  'clone' : False}),
-    #                       Trainables.BatchLinearNoGroup(N_NETWORKS, N_HID, N_OUT,
+    #                       trainables.BatchLinearNoGroup(N_NETWORKS, N_HID, N_OUT,
     #                                                     init_method='uniform',
     #                                                     init_config={'a' : -0.005,
     #                                                                  'b' : 0.005,
     #                                                                  'clone' : False})).to(DEVICE)
     
     # optimizer = torch.optim.SGD(model.parameters(), lr=0.01)
-    # criterion = BatchLosses.MSELoss()
+    # criterion = batch_losses.MSELoss()
     
-    # provider = Observers.PreviousParameterProvider()
-    # handlers = [Observers.EnergyL1NetworkHandler(provider), Observers.EnergyL2NetworkHandler(provider)]
-    # trackers = [Observers.Data(), 
-    #             Observers.RunningLossTracker(),
-    #             Observers.RunningAccuracyTracker(),
-    #             Observers.TestingLossTracker(['MSELoss']),
-    #             Observers.TestingAccuracyTracker(),
+    # provider = interceptors.PreviousParameterProvider()
+    # handlers = [interceptors.EnergyL1NetworkHandler(provider), interceptors.EnergyL2NetworkHandler(provider)]
+    # trackers = [interceptors.Data(), 
+    #             interceptors.RunningLossTracker(),
+    #             interceptors.RunningAccuracyTracker(),
+    #             interceptors.TestingLossTracker(['MSELoss']),
+    #             interceptors.TestingAccuracyTracker(),
     #             provider,
-    #             Observers.TestLoop(test_dataloader, criterions={'MSELoss' : BatchLosses.MSELoss()}, device=DEVICE),
-    #             #Observers.EnergyL1NetworkTracker(),
-    #             #Observers.EnergyL2NetworkTracker()]
-    #             Observers.ParameterIterator(handlers=handlers)]
+    #             interceptors.TestLoop(test_dataloader, criterions={'MSELoss' : batch_losses.MSELoss()}, device=DEVICE),
+    #             #interceptors.EnergyL1NetworkTracker(),
+    #             #interceptors.EnergyL2NetworkTracker()]
+    #             interceptors.ParameterIterator(handlers=handlers)]
     
     # s=time.time()
     
     # #print(list(model.parameters()))
     
-    # trainer = Trainers.Trainer(model, 
+    # trainer = trainers.Trainer(model, 
     #                            N_NETWORKS, 
     #                            optimizer, 
     #                            criterion, 

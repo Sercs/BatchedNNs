@@ -673,14 +673,12 @@ class MinimumEnergyL1NetworkTracker(Interceptor):
         self.minimum_energy_l1 = torch.zeros((state['n_networks'],))
         state['data']['minimum_energies_l1'] = []
         
-    def after_step(self, state):       
+    def after_test(self, state):
         delta = torch.zeros((state['n_networks'])).to(state['device'])
         for n, p in state['model'].named_parameters():
             init_p = self.provider.initial_parameters[n] 
             delta += (p - init_p).abs().sum(dim=tuple(range(1, p.ndim)))
         self.minimum_energy_l1 = delta.detach().cpu()
-        
-    def after_test(self, state):
         state['data']['minimum_energies_l1'].append(self.minimum_energy_l1.clone().numpy())
  
 class EnergyL1NetworkTracker(Interceptor):
@@ -707,24 +705,15 @@ class MinimumEnergyL1LayerwiseTracker(Interceptor):
         self.provider = initial_parameter_provider
     
     def before_train(self, state):
-
-        self.minimum_energy_l1_layerwise = {
-            n: torch.zeros((state['n_networks'],)) for n, _ in state['model'].named_parameters()
-        }
         state['data']['minimum_energies_l1_layerwise'] = {
             n: [] for n, _ in state['model'].named_parameters()
         }
         
-    def after_step(self, state):
+    def after_test(self, state):
         for n, p in state['model'].named_parameters():
             init_p = self.provider.initial_parameters[n].to(p.device)
             delta = (p - init_p).abs().sum(dim=tuple(range(1, p.ndim)))
-
-            self.minimum_energy_l1_layerwise[n] = delta.detach().cpu()
-        
-    def after_test(self, state):
-        for n, energy in self.minimum_energy_l1_layerwise.items():
-            state['data']['minimum_energies_l1_layerwise'][n].append(energy.clone().numpy())
+            state['data']['minimum_energies_l1_layerwise'][n].append(delta.detach().cpu().clone().numpy())
 
 class EnergyL1LayerwiseTracker(Interceptor):
     def __init__(self, previous_parameter_provider):
@@ -759,16 +748,14 @@ class MinimumEnergyL1NeuronwiseTracker(Interceptor):
         self.energy_direction = energy_direction
         
     def before_train(self, state):
-        self.minimum_energy_l1_neuronwise = {}
         state['data']['minimum_energies_l1_neuronwise'] = {}
         for n, p in state['model'].named_parameters():
             state['data']['minimum_energies_l1_neuronwise'][n] = {
                 e_dir: [] for e_dir in self.energy_direction
             }
-            
-    def after_step(self, state):
+    
+    def after_test(self, state):
         for n, p in state['model'].named_parameters():
-            self.minimum_energy_l1_neuronwise[n] = {}
             init_p = self.provider.initial_parameters[n].to(p.device)
             delta = (p - init_p).abs()
             
@@ -784,12 +771,7 @@ class MinimumEnergyL1NeuronwiseTracker(Interceptor):
                         # sum over output dimension (dim 1)
                         energy = delta.sum(dim=1)
                 if energy is not None:
-                    self.minimum_energy_l1_neuronwise[n][e_dir] = energy.detach().cpu()
-        
-    def after_test(self, state):
-        for n, layer_energies in self.minimum_energy_l1_neuronwise.items():
-            for e_dir, energy in layer_energies.items():
-                state['data']['minimum_energies_l1_neuronwise'][n][e_dir].append(energy.clone().numpy())
+                    state['data']['minimum_energies_l1_neuronwise'][n][e_dir].append(energy.detach().cpu().clone().numpy())
 
 class EnergyL1NeuronwiseTracker(Interceptor):
 
@@ -816,7 +798,7 @@ class EnergyL1NeuronwiseTracker(Interceptor):
                         shape = p.shape[:2] # (n, j) -> one value per output neuron
                     elif e_dir == 'outgoing':
                         # (n, i, ...) -> one value per input neuron
-                        shape = (p.shape[0],) + p.shape[2:] 
+                        shape = (p.shape[0],) + p.shape[2:]
                 
                 if shape is not None:
                     self.energy_l1_neuronwise[n][e_dir] = torch.zeros(shape)
@@ -855,7 +837,7 @@ class MinimumEnergyL2NetworkTracker(Interceptor):
         self.minimum_energy_l2 = torch.zeros((state['n_networks'],))
         state['data']['minimum_energies_l2'] = []
         
-    def after_step(self, state):       
+    def after_test(self, state):
         delta = torch.zeros((state['n_networks'])).to(state['device'])
         for n, p in state['model'].named_parameters():
             init_p = self.provider.initial_parameters[n] 
@@ -866,8 +848,6 @@ class MinimumEnergyL2NetworkTracker(Interceptor):
                         )
         delta = delta ** 0.5
         self.minimum_energy_l2 = delta.detach().cpu()
-        
-    def after_test(self, state):
         state['data']['minimum_energies_l2'].append(self.minimum_energy_l2.clone().numpy())   
         
 class EnergyL2NetworkTracker(Interceptor):
@@ -914,16 +894,13 @@ class MinimumEnergyL0NetworkTracker(Interceptor):
     def before_train(self, state):
         self.minimum_energy_l0 = torch.zeros((state['n_networks'],))
         state['data']['minimum_energies_l0'] = []
-        
-        # before step, after loss = grads available
-    def before_step(self, state):
+    
+    def after_test(self, state):
         delta = torch.zeros((state['n_networks'],)).to(state['device'])
         for n, p in state['model'].named_parameters():
             init_p = self.provider.initial_parameters[n] 
             delta += torch.count_nonzero(p - init_p, dim=(tuple(range(1, p.ndim))))
         self.minimum_energy_l0 = delta.detach().cpu()
-    
-    def after_step(self, state):
         state['data']['minimum_energies_l0'].append(self.minimum_energy_l0.clone().numpy())
         
 ########################### PARAMETER ITERATOR ################################
@@ -942,7 +919,6 @@ class ParameterIterator(Interceptor):
         
     def _func(self, state, event_name): # use when you want to compute over individual parameters
         event_name += '_func'
-        #print(event_name)
         for n, p in state['model'].named_parameters():
             for handler in self.handlers:
                 if hasattr(handler, event_name):
@@ -995,6 +971,13 @@ class ParameterIterator(Interceptor):
         
         if self._should_run('log', 'after_step'):
             self._log(state, 'after_step')
+            
+    def before_test(self, state):
+        if self._should_run('func', 'before_test'):
+            self._func(state, 'before_test')
+        
+        if self._should_run('log', 'before_test'):
+            self._log(state, 'before_test')
         
     def after_test(self, state):
         if self._should_run('func', 'after_test'):
@@ -1037,32 +1020,25 @@ class MinimumEnergyL0NetworkHandler(Handler):
         
     events = {
             'before_train' : ['log'],
-            'before_update' : ['log'],
-            'before_step' : ['func'],
-            'after_update' : ['log'],
-            'after_test' : ['log']
+            'before_test' : ['log'],
+            'after_test' : ['func', 'log']
         }
 
     def __init__(self, initial_parameter_provider):
         self.provider = initial_parameter_provider
         
     def before_train_log(self, state):
-        self.minimum_energy_l0 = torch.zeros((state['n_networks'],))
         state['data']['minimum_energies_l0'] = []
+    
+    def before_test_log(self, state):
+        self.minimum_energy_l0 = torch.zeros((state['n_networks'],)).to(state['device'])
         
-    def before_update_log(self, state):
-        self.delta = torch.zeros((state['n_networks'],)).to(state['device'])
-        
-        # before step, after loss = grads available
-    def before_step_func(self, n, p, state):
+    def after_test_func(self, n, p, state):
         init_p = self.provider.initial_parameters[n] 
-        self.delta += torch.count_nonzero(p - init_p, dim=(tuple(range(1, p.ndim))))
-        
-    def after_update_log(self, state):
-        self.minimum_energy_l0 = self.delta.detach().cpu()
+        self.minimum_energy_l0 += torch.count_nonzero(p - init_p, dim=(tuple(range(1, p.ndim))))
     
     def after_test_log(self, state):
-        state['data']['minimum_energies_l0'].append(self.minimum_energy_l0.clone().numpy())
+        state['data']['minimum_energies_l0'].append(self.minimum_energy_l0.detach().cpu().clone().numpy())
 
 class EnergyL1NetworkHandler(Handler):
     
@@ -1082,7 +1058,6 @@ class EnergyL1NetworkHandler(Handler):
     def after_step_func(self, n, p, state):
         prev_p = self.provider.previous_parameters[n] 
         delta = (p - prev_p).abs().sum(dim=tuple(range(1, p.ndim)))
-        #print(delta)
         self.energy_l1 += delta.detach().cpu()
         
     def after_test_log(self, state):
@@ -1092,38 +1067,31 @@ class MinimumEnergyL1NetworkHandler(Handler):
     
     events = {
             'before_train' : ['log'],
-            'before_update' : ['log'],
-            'after_step' : ['func'],
-            'after_update' : ['log'],
-            'after_test' : ['log']
+            'before_test' : ['log'],
+            'after_test' : ['func', 'log']
         }
     
     def __init__(self, initial_parameter_provider):
         self.provider = initial_parameter_provider
     
     def before_train_log(self, state):
-        self.minimum_energy_l1 = torch.zeros((state['n_networks'],))
         state['data']['minimum_energies_l1'] = []
     
-    def before_update_log(self, state):
-        self.delta = torch.zeros((state['n_networks'],)).to(state['device'])
-    
-    def after_step_func(self, n, p, state):
-        init_p = self.provider.initial_parameters[n] 
-        self.delta += (p - init_p).abs().sum(dim=tuple(range(1, p.ndim)))
+    def before_test_log(self, state):
+        self.minimum_energy_l1 = torch.zeros((state['n_networks'],)).to(state['device'])
         
-    def after_update_log(self, state):
-        self.minimum_energy_l1 = self.delta.detach().cpu()
+    def after_test_func(self, n, p, state):
+        init_p = self.provider.initial_parameters[n] 
+        self.minimum_energy_l1 += (p - init_p).abs().sum(dim=tuple(range(1, p.ndim)))
         
     def after_test_log(self, state):
-        state['data']['minimum_energies_l1'].append(self.minimum_energy_l1.clone().numpy())
+        state['data']['minimum_energies_l1'].append(self.minimum_energy_l1.detach().cpu().clone().numpy())
 
 class MinimumEnergyL1LayerwiseHandler(Handler):
     events = {
         'before_train': ['log'],
-        'before_step': ['log'],
-        'after_step': ['func'],
-        'after_test': ['log']
+        'before_test': ['log'],
+        'after_test': ['func', 'log']
     }
     
     def __init__(self, initial_parameter_provider):
@@ -1135,10 +1103,10 @@ class MinimumEnergyL1LayerwiseHandler(Handler):
             n: [] for n, _ in state['model'].named_parameters()
         }
     
-    def before_step_log(self, state):
+    def before_test_log(self, state):
         self.current_minimum_energy = {}
-
-    def after_step_func(self, n, p, state):
+        
+    def after_test_func(self, n, p, state):
         init_p = self.provider.initial_parameters[n].to(p.device)
         delta = (p - init_p).abs().sum(dim=tuple(range(1, p.ndim)))
         self.current_minimum_energy[n] = delta.detach().cpu()
@@ -1178,9 +1146,8 @@ class EnergyL1LayerwiseHandler(Handler):
 class MinimumEnergyL1NeuronwiseHandler(Handler):
     events = {
         'before_train': ['log'],
-        'before_step': ['log'],
-        'after_step': ['func'],
-        'after_test': ['log']
+        'before_test': ['log'],
+        'after_test': ['func', 'log']
     }
     
     def __init__(self, initial_parameter_provider, energy_direction='incoming'):
@@ -1196,11 +1163,11 @@ class MinimumEnergyL1NeuronwiseHandler(Handler):
             state['data']['minimum_energies_l1_neuronwise'][n] = {
                 e_dir: [] for e_dir in self.energy_direction
             }
-            
-    def before_step_log(self, state):
+                
+    def before_test_log(self, state):
         self.current_minimum_energy = {}
-
-    def after_step_func(self, n, p, state):
+        
+    def after_test_func(self, n, p, state):
         self.current_minimum_energy[n] = {}
         init_p = self.provider.initial_parameters[n].to(p.device)
         delta = (p - init_p).abs()
@@ -1216,7 +1183,7 @@ class MinimumEnergyL1NeuronwiseHandler(Handler):
             
             if energy is not None:
                 self.current_minimum_energy[n][e_dir] = energy.detach().cpu()
-        
+                
     def after_test_log(self, state):
         for n, layer_energies in self.current_minimum_energy.items():
             for e_dir, energy in layer_energies.items():
@@ -1279,10 +1246,8 @@ class MinimumEnergyL2NetworkHandler(Handler):
     
     events = {
             'before_train' : ['log'],
-            'before_update' : ['log'],
-            'after_step' : ['func'],
-            'after_update' : ['log'],
-            'after_test' : ['log']
+            'before_test' : ['log'],
+            'after_test' : ['func', 'log']
         }
     
     def __init__(self, initial_parameter_provider):
@@ -1291,24 +1256,21 @@ class MinimumEnergyL2NetworkHandler(Handler):
     def before_train_log(self, state):
         self.minimum_energy_l1 = torch.zeros((state['n_networks'],))
         state['data']['minimum_energies_l2'] = []
-    
-    def before_update_log(self, state):
-        self.delta = torch.zeros((state['n_networks'],)).to(state['device'])
-    
-    def after_step_func(self, n, p, state):
+        
+    def before_test_log(self, state):
+        self.minimum_energy_l2 = torch.zeros((state['n_networks'],)).to(state['device'])
+        
+    def after_test_func(self, n, p, state):
         init_p = self.provider.initial_parameters[n] 
-        self.delta += ((
+        self.minimum_energy_l2 += ((
                         (p - init_p)**2
                              ).sum(dim=tuple(range(1, p.ndim))
                                  )
                         )
         
-    def after_update_log(self, state):
-        self.delta = self.delta ** 0.5
-        self.minimum_energy_l2 = self.delta.detach().cpu()
-        
     def after_test_log(self, state):
-        state['data']['minimum_energies_l2'].append(self.minimum_energy_l2.clone().numpy())
+        self.minimum_energy_l2 = self.minimum_energy_l2 ** 0.5
+        state['data']['minimum_energies_l2'].append(self.minimum_energy_l2.detach().cpu().clone().numpy())
         
 class EnergyL2NetworkHandler(Handler):
     
@@ -1348,9 +1310,8 @@ class EnergyL2NetworkHandler(Handler):
 class MinimumEnergyL2LayerwiseHandler(Handler):
     events = {
         'before_train': ['log'],
-        'before_step': ['log'],
-        'after_step': ['func'],
-        'after_test': ['log']
+        'before_test': ['log'],
+        'after_test': ['func', 'log']
     }
     
     def __init__(self, initial_parameter_provider):
@@ -1361,15 +1322,15 @@ class MinimumEnergyL2LayerwiseHandler(Handler):
         state['data']['minimum_energies_l2_layerwise'] = {
             n: [] for n, _ in state['model'].named_parameters()
         }
-    
-    def before_step_log(self, state):
+        
+    def before_test_log(self, state):
         self.current_minimum_energy = {}
-
-    def after_step_func(self, n, p, state):
+        
+    def after_test_func(self, n, p, state):
         init_p = self.provider.initial_parameters[n].to(p.device)
         delta = ((p - init_p)**2).sum(dim=tuple(range(1, p.ndim)))**0.5
         self.current_minimum_energy[n] = delta.detach().cpu()
-
+    
     def after_test_log(self, state):
         for n, energy in self.current_minimum_energy.items():
             state['data']['minimum_energies_l2_layerwise'][n].append(energy.clone().numpy())
@@ -1405,9 +1366,8 @@ class EnergyL2LayerwiseHandler(Handler):
 class MinimumEnergyL2NeuronwiseHandler(Handler):
     events = {
         'before_train': ['log'],
-        'before_step': ['log'],
-        'after_step': ['func'],
-        'after_test': ['log']
+        'before_test'  : ['log'],
+        'after_test': ['func', 'log']
     }
     
     def __init__(self, initial_parameter_provider, energy_direction='incoming'):
@@ -1423,11 +1383,11 @@ class MinimumEnergyL2NeuronwiseHandler(Handler):
             state['data']['minimum_energies_l2_neuronwise'][n] = {
                 e_dir: [] for e_dir in self.energy_direction
             }
-            
-    def before_step_log(self, state):
+                
+    def before_test_log(self, state):
         self.current_minimum_energy = {}
-
-    def after_step_func(self, n, p, state):
+    
+    def after_test_func(self, n, p, state):
         self.current_minimum_energy[n] = {}
         init_p = self.provider.initial_parameters[n].to(p.device)
         delta_sq = (p - init_p)**2
