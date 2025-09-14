@@ -230,7 +230,7 @@ def sampler_samples_test():
 #def sampler_test():
 if __name__ == '__main__':
     DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-    N_NETWORKS = 5
+    N_NETWORKS = 500
     BATCH_SIZE = 16
     N_IN = 784
     N_HID = 100
@@ -258,18 +258,14 @@ if __name__ == '__main__':
     train = dm.DatasetWithIdx(train_dataset, task='classify')
     test = dm.DatasetWithIdx(test_dataset, task='classify')
     
-    s=samplers.VaryBatchAndDatasetSizeSampler(
-        train, N_NETWORKS, dataset_sizes=[60_000, 60_000, 60_000, 60_000, 60_000], 
-        batch_sizes=[1, 1, 1, 1, 1], 
-        method='loop',
-        order='identical'
-    )
+    s=samplers.RandomSampler(train, 1, N_NETWORKS)
     general_collate = samplers.collate_fn(N_NETWORKS)
     
-    samples_used = s.get_samples_per_network()
+    #samples_used = s.get_samples_per_network()
 
     train_dataloader = DataLoader(train,
                                   #batch_size=1)
+                              pin_memory=True,
                               num_workers=4,
                               batch_sampler=s,
                               collate_fn=general_collate)
@@ -302,22 +298,7 @@ if __name__ == '__main__':
     previous_param_provider = interceptors.PreviousParameterProvider()
     initial_param_provider = interceptors.InitialParameterProvider()
     prev_prev_param_provider = interceptors.PreviousPreviousParameterProvider(previous_param_provider)
-    # handlers = [interceptors.EnergyL2NeuronwiseHandler(previous_param_provider, ['incoming', 'outgoing']), 
-    #             interceptors.MinimumEnergyL2NeuronwiseHandler(initial_param_provider, ['incoming', 'outgoing']),
-    #             interceptors.EnergyL2LayerwiseHandler(previous_param_provider),
-    #             interceptors.MinimumEnergyL2LayerwiseHandler(initial_param_provider),
-    #             interceptors.MinimumEnergyL2NetworkHandler(initial_param_provider),
-    #             interceptors.EnergyL2NetworkHandler(previous_param_provider),
-                
-    #             interceptors.EnergyL1NeuronwiseHandler(previous_param_provider, ['incoming', 'outgoing']), 
-    #             interceptors.MinimumEnergyL1NeuronwiseHandler(initial_param_provider, ['incoming', 'outgoing']),
-    #             interceptors.EnergyL1LayerwiseHandler(previous_param_provider),
-    #             interceptors.MinimumEnergyL1LayerwiseHandler(initial_param_provider),
-    #             interceptors.MinimumEnergyL1NetworkHandler(initial_param_provider),
-    #             interceptors.EnergyL1NetworkHandler(previous_param_provider),
-                
-    #             interceptors.MinimumEnergyL0NetworkHandler(initial_param_provider),
-    #             interceptors.EnergyL0NetworkHandler()]
+
     
     trackers = [interceptors.TestingLossTracker({'test': ['MSELoss']}),
                 interceptors.Timer(),
@@ -358,7 +339,7 @@ if __name__ == '__main__':
                                test_dataloader, 
                                trackers=trackers, 
                                device=DEVICE)
-    trainer.train_loop(0.05, 0.01, sample_increment=1)
+    trainer.train_loop(0.05, 0.025, sample_increment=1)
     file_path = os.path.join(outputs_dir, 'experiment1.json')
     trainer.save_data_as_json(file_path)
     # acc = np.array(trainer.state['data']['test_accuracies']).T

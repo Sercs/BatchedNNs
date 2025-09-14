@@ -34,4 +34,49 @@ def print_state_data_structure(state, level=0):
             print_state_data_structure(value, level + 1)
         else:
             # If it's a leaf node, print the key and type with the current indentation.
-            print(f"{indent}{key}: {type(value).__name__}") 
+            print(f"{indent}{key}: {type(value).__name__}")
+
+# Gemini-Flash 2.5
+def moving_mean(data: np.ndarray, window_size, axis = -1):
+    """
+    Calculates the moving mean of a NumPy array along a specified axis using convolution.
+
+    The moving mean is calculated by convolving the data with a window of ones,
+    and then dividing by the window size. The 'same' mode of convolution is used,
+    which means the output will have the same length as the input along the
+    specified axis. This method adds padding to both ends of the input so the
+    convolution result is centered and maintains the original size.
+
+    Args:
+        data (np.ndarray): A NumPy array of numerical data.
+        window_size (int): The size of the moving window. Must be a positive integer.
+        axis (int, optional): The axis along which to compute the moving mean.
+                              Defaults to the last axis (-1).
+
+    Returns:
+        np.ndarray: A new NumPy array containing the moving mean values, padded to
+                    the original dimension.
+
+    Raises:
+        ValueError: If window_size is not a positive integer, is larger than the
+                    data length along the specified axis, or if the axis is out of bounds.
+    """
+    if not isinstance(window_size, int) or window_size <= 0:
+        raise ValueError("window_size must be a positive integer.")
+        
+    if axis >= data.ndim or axis < -data.ndim:
+        raise ValueError(f"Axis {axis} is out of bounds for an array with {data.ndim} dimensions.")
+
+    data_length = data.shape[axis]
+    if window_size > data_length:
+        raise ValueError(f"window_size ({window_size}) cannot be larger than the data length ({data_length}) along axis {axis}.")
+
+    # Define the convolution kernel (a window of ones)
+    weights = np.ones(window_size)
+    
+    # Define a helper function to apply the 1D convolution with 'same' mode
+    def _convolve_1d(arr):
+        return np.convolve(arr, weights, 'same') / window_size
+
+    # Apply the 1D convolution function along the specified axis
+    return np.apply_along_axis(_convolve_1d, axis, data)

@@ -69,6 +69,7 @@ class Trainer():
         test_epoch = 0
         sample_counter = 0
         
+        
         # >>> Main loop <<<
         self._fire_event('before_train')
         for epoch in range(n_epochs):
