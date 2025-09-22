@@ -80,3 +80,23 @@ def moving_mean(data: np.ndarray, window_size, axis = -1):
 
     # Apply the 1D convolution function along the specified axis
     return np.apply_along_axis(_convolve_1d, axis, data)
+
+def convert_data(data_dict):
+    """
+    Recursively converts lists within a nested dictionary to NumPy arrays.
+
+    Args:
+        data_dict: The dictionary to traverse and convert.
+
+    Returns:
+        The modified dictionary with lists converted to NumPy arrays.
+    """
+    if isinstance(data_dict, dict):
+        for key, value in data_dict.items():
+            # If the value is a dictionary, recurse on it.
+            if isinstance(value, dict):
+                data_dict[key] = convert_data(value)
+            # If the value is a list, convert it to a NumPy array.
+            elif isinstance(value, list):
+                data_dict[key] = np.array(value)
+    return data_dict

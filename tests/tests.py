@@ -226,12 +226,12 @@ def sampler_samples_test():
     for i in train_dataloader:
         print(i[-1])
     print(samples_used)
-    
+
 #def sampler_test():
 if __name__ == '__main__':
     DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-    N_NETWORKS = 500
-    BATCH_SIZE = 16
+    N_NETWORKS = 5
+    BATCH_SIZE = 32
     N_IN = 784
     N_HID = 100
     N_OUT = 10
@@ -258,7 +258,7 @@ if __name__ == '__main__':
     train = dm.DatasetWithIdx(train_dataset, task='classify')
     test = dm.DatasetWithIdx(test_dataset, task='classify')
     
-    s=samplers.RandomSampler(train, 1, N_NETWORKS)
+    s=samplers.RandomSampler(train, BATCH_SIZE, N_NETWORKS)
     general_collate = samplers.collate_fn(N_NETWORKS)
     
     #samples_used = s.get_samples_per_network()
@@ -284,48 +284,42 @@ if __name__ == '__main__':
                                                         activation=nn.GELU(),
                                                         init_method='uniform',
                                                         init_config={'a' : -1/np.sqrt(784),
-                                                                     'b' : 1/np.sqrt(784),
-                                                                     'clone' : True}),
+                                                                     'b' : 1/np.sqrt(784)}
+                                                        ),
+                          trainables.BatchDecorrelation(N_NETWORKS, N_HID, 
+                                                        decor_lr=[1e-4, 1e-5, 1e-6, 1e-7, 1e-8],
+                                                        mu_lr=np.linspace(0.01, 0.1, 5)),
                           trainables.BatchLinear(N_NETWORKS, N_HID, N_OUT,
                                                         init_method='uniform',
                                                         init_config={'a' : -1/np.sqrt(100),
-                                                                     'b' : 1/np.sqrt(100),
-                                                                     'clone' : True})).to(DEVICE)
+                                                                     'b' : 1/np.sqrt(100)}
+                                                        ),
+                          ).to(DEVICE)
     
     optimizer = torch.optim.SGD(model.parameters(), lr=0.01)
-    criterion1 = batch_losses.MSELoss(per_sample=True, reduction='mean')
+    # criterion1 = batch_losses.LazyLoss(batch_losses.MSELoss(per_sample=True,
+    #                                                         reduction='mean'),
+    #                                    per_sample=True,
+    #                                    reduction='mean') # note batch_losses
+    criterion1 = batch_losses.HingeLoss(per_sample=True, reduction='mean', margin=torch.linspace(0, 1, 5))
     
     previous_param_provider = interceptors.PreviousParameterProvider()
     initial_param_provider = interceptors.InitialParameterProvider()
     prev_prev_param_provider = interceptors.PreviousPreviousParameterProvider(previous_param_provider)
-
     
-    trackers = [interceptors.TestingLossTracker({'test': ['MSELoss']}),
-                interceptors.Timer(),
+    trackers = [interceptors.Timer(),
+                interceptors.TestingLossTracker({'test': ['MSELoss']}),
                 interceptors.TestingAccuracyTracker(['test']),
-                prev_prev_param_provider,
                 previous_param_provider,
                 initial_param_provider,
                 interceptors.TestLoop('test', 
                                    test_dataloader, 
                                    criterions={'MSELoss' : batch_losses.MSELoss(per_sample=False, 
-                                                                                                 reduction='sum')}, 
+                                                                                reduction='sum')}, 
                                    device=DEVICE),
-                interceptors.EnergyL1NetworkTracker(previous_param_provider), # need handlers too
-                interceptors.MinimumEnergyL1NetworkTracker(initial_param_provider),
-                
+                interceptors.EnergyL1NetworkTracker(previous_param_provider),
                 interceptors.EnergyL1LayerwiseTracker(previous_param_provider),
-                interceptors.MinimumEnergyL1LayerwiseTracker(initial_param_provider),
-                
-                interceptors.EnergyL1NeuronwiseTracker(previous_param_provider, ['incoming', 'outgoing']),
-                interceptors.MinimumEnergyL1NeuronwiseTracker(initial_param_provider, ['incoming', 'outgoing']),
-                
-                interceptors.EnergyL2NetworkTracker(previous_param_provider),
-                interceptors.MinimumEnergyL2NetworkTracker(initial_param_provider),
-                
-                
-                interceptors.MinimumEnergyL0NetworkTracker(initial_param_provider),
-                interceptors.EnergyL0NetworkTracker()]
+                interceptors.MinimumEnergyL1NetworkTracker(initial_param_provider)]
     
     s=time.time()
     
@@ -339,22 +333,22 @@ if __name__ == '__main__':
                                test_dataloader, 
                                trackers=trackers, 
                                device=DEVICE)
-    trainer.train_loop(0.05, 0.025, sample_increment=1)
+    trainer.train_loop(1, 0.05, sample_increment=1)
     file_path = os.path.join(outputs_dir, 'experiment1.json')
-    trainer.save_data_as_json(file_path)
-    # acc = np.array(trainer.state['data']['test_accuracies']).T
-    # en = np.array(trainer.state['data']['energies_l1']).T
-    # print(acc.shape)
-    # print(en.shape)
+    #trainer.save_data_as_json(file_path)
+    acc = np.array(trainer.state['data']['test_accuracies']['test']).T
+    en = np.array(trainer.state['data']['energies_l1']).T
+    print(acc.shape)
+    print(en.shape)
     print(time.time()-s)
-    # # pal = plt.get_cmap('Reds_r', N_NETWORKS+2)
-    # # for line in range(N_NETWORKS):
-    # #     plt.plot(acc[line], en[line], color=pal(line))
-    # # print(time.time()-s)
-    # plt.show()
-    # for line in range(N_NETWORKS):
-    #     plt.plot(acc[line], color=pal(line))
-    # plt.show()
+    pal = plt.get_cmap('Reds_r', N_NETWORKS+2)
+    for line in range(N_NETWORKS):
+        plt.plot(acc[line], en[line], color=pal(line))
+    print(time.time()-s)
+    plt.show()
+    for line in range(N_NETWORKS):
+        plt.plot(acc[line], color=pal(line))
+    plt.show()
     ## BP ##
     # model = nn.Sequential(trainables.BatchLinearNoGroup(N_NETWORKS, N_IN, N_HID, 
     #                                                     activation=nn.GELU(),
@@ -411,6 +405,200 @@ if __name__ == '__main__':
     # for line in range(N_NETWORKS):
     #     plt.plot(acc2[line], color=pal2(line))
     # plt.show()
+    
+def recur_test():
+#if __name__ == '__main__':
+    DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+    N_NETWORKS = 50
+    BATCH_SIZE = 1
+    N_IN = 784
+    N_HID = 100
+    N_OUT = 10
+    INIT_RANGE = np.linspace(0.005, 0.5, N_NETWORKS)
+
+    transform = transforms.Compose([
+        transforms.ToTensor(),
+        transforms.Normalize((0.1307,), (0.3081,))
+    ])
+    train_dataset = datasets.MNIST(root='datasets',
+                             #split='digits', # used as a quick swap for EMNIST
+                                train=True,
+                                download=True,
+                                transform=transform, # automatically coverts 0 - 255 --> 0 - 1
+                                target_transform=dm.temp_onehot)
+    
+    test_dataset = datasets.MNIST(root='datasets',
+                             #split='digits', # used as a quick swap for EMNIST
+                                train=False,
+                                download=True,
+                                transform=transform, # automatically coverts 0 - 255 --> 0 - 1
+                                target_transform=dm.temp_onehot)
+    
+    train = dm.DatasetWithIdx(train_dataset, task='classify')
+    test = dm.DatasetWithIdx(test_dataset, task='classify')
+    
+    s=samplers.RandomSampler(train, 1, N_NETWORKS)
+    general_collate = samplers.collate_fn(N_NETWORKS)
+    
+    #samples_used = s.get_samples_per_network()
+
+    train_dataloader = DataLoader(train,
+                                  #batch_size=1)
+                              pin_memory=True,
+                              num_workers=4,
+                              batch_sampler=s,
+                              collate_fn=general_collate)
+    
+    eval_dataloader = DataLoader(train,
+                                 batch_size=16,
+                                 num_workers=4,
+                                 shuffle=False)
+    print(len(train_dataloader))
+    test_dataloader = DataLoader(test,
+                              batch_size=16,
+                              num_workers=4,
+                              shuffle=False)
+    
+    model = nn.Sequential(trainables.BatchLinear(N_NETWORKS, N_IN, N_HID, 
+                                                        activation=nn.GELU(),
+                                                        init_method='uniform',
+                                                        init_config={'a' : -1/np.sqrt(784),
+                                                                     'b' : 1/np.sqrt(784)}),
+                          trainables.BatchLinear(N_NETWORKS, N_HID, N_HID, 
+                                                        activation=nn.GELU(),
+                                                        init_method='uniform',
+                                                        init_config={'a' : -1/np.sqrt(100),
+                                                                     'b' : 1/np.sqrt(100)}),
+                          trainables.BatchLinear(N_NETWORKS, N_HID, N_OUT,
+                                                        init_method='uniform',
+                                                        init_config={'a' : -1/np.sqrt(100),
+                                                                     'b' : 1/np.sqrt(100)})
+                          ).to(DEVICE)
+    
+    optimizer = torch.optim.AdamW(model.parameters(), lr=0.00025, weight_decay=0.0)
+    criterion1 = batch_losses.MSELoss(per_sample=True, reduction='mean')
+    
+    previous_param_provider = interceptors.PreviousParameterProvider()
+    initial_param_provider = interceptors.InitialParameterProvider()
+
+    trackers = [interceptors.TestingLossTracker({'test': ['MSELoss']}),
+                interceptors.Timer(),
+                interceptors.TestingAccuracyTracker(['test']),
+                previous_param_provider,
+                initial_param_provider,
+                interceptors.TestLoop('test', 
+                                   test_dataloader, 
+                                   criterions={'MSELoss' : batch_losses.MSELoss(per_sample=False, 
+                                                                                                 reduction='sum')}, 
+                                   device=DEVICE),
+                interceptors.EnergyL1NetworkTracker(previous_param_provider), # need handlers too
+                interceptors.MinimumEnergyL1NetworkTracker(initial_param_provider)]
+    
+    s=time.time()
+    
+    trainer = trainers.Trainer(model, 
+                               N_NETWORKS, 
+                               optimizer, 
+                               criterion1, 
+                               train_dataloader, 
+                               test_dataloader, 
+                               trackers=trackers, 
+                               device=DEVICE)
+    trainer.train_loop(10, 0.05, sample_increment=1)
+    d1 = trainer.state['data'].copy()
+    print(np.array(trainer.state['data']['test_accuracies']['test'])) # TODO: might need "fire on init"
+    model[1].n_recurs = 1
+    new_optimizer = torch.optim.AdamW(model.parameters(), lr=0.00025, weight_decay=0.0)
+    trainer.state['optimizer'] = new_optimizer
+    trainer.train_loop(10, 0.05, sample_increment=1)
+    print(np.array(trainer.state['data']['test_accuracies']['test']))
+    d2 = trainer.state['data']
+    
+    model = nn.Sequential(trainables.BatchLinear(N_NETWORKS, N_IN, N_HID, 
+                                                        activation=nn.GELU(),
+                                                        init_method='uniform',
+                                                        init_config={'a' : -1/np.sqrt(784),
+                                                                     'b' : 1/np.sqrt(784)}),
+                          trainables.BatchLinear(N_NETWORKS, N_HID, N_HID, 
+                                                        activation=nn.GELU(),
+                                                        init_method='uniform',
+                                                        init_config={'a' : -1/np.sqrt(100),
+                                                                     'b' : 1/np.sqrt(100)}),
+                          trainables.BatchLinear(N_NETWORKS, N_HID, N_OUT,
+                                                        init_method='uniform',
+                                                        init_config={'a' : -1/np.sqrt(100),
+                                                                     'b' : 1/np.sqrt(100)})
+                          ).to(DEVICE)
+    
+    optimizer = torch.optim.AdamW(model.parameters(), lr=0.00025, weight_decay=0.0)
+    criterion1 = batch_losses.MSELoss(per_sample=True, reduction='mean')
+    
+    previous_param_provider = interceptors.PreviousParameterProvider()
+    initial_param_provider = interceptors.InitialParameterProvider()
+
+    trackers = [interceptors.TestingLossTracker({'test': ['MSELoss']}),
+                interceptors.Timer(),
+                interceptors.TestingAccuracyTracker(['test']),
+                previous_param_provider,
+                initial_param_provider,
+                interceptors.TestLoop('test', 
+                                   test_dataloader, 
+                                   criterions={'MSELoss' : batch_losses.MSELoss(per_sample=False, 
+                                                                                                 reduction='sum')}, 
+                                   device=DEVICE),
+                interceptors.EnergyL1NetworkTracker(previous_param_provider), # need handlers too
+                interceptors.MinimumEnergyL1NetworkTracker(initial_param_provider)]
+    
+    s=time.time()
+    
+    trainer = trainers.Trainer(model, 
+                               N_NETWORKS, 
+                               optimizer, 
+                               criterion1, 
+                               train_dataloader, 
+                               test_dataloader, 
+                               trackers=trackers, 
+                               device=DEVICE)
+    trainer.train_loop(10, 0.05, sample_increment=1)
+    d3 = trainer.state['data'].copy()
+    print(np.array(trainer.state['data']['test_accuracies']['test'])) # TODO: might need "fire on init"
+    new_model = nn.Sequential(model[0], 
+                              model[1], 
+                              trainables.BatchLinear(N_NETWORKS, N_HID, N_HID, 
+                                                            activation=nn.GELU(),
+                                                            init_method='uniform',
+                                                            init_config={'a' : -1/np.sqrt(100),
+                                                                         'b' : 1/np.sqrt(100)}),
+                              model[2]
+                              ).to(DEVICE)
+    previous_param_provider = interceptors.PreviousParameterProvider()
+    initial_param_provider = interceptors.InitialParameterProvider()
+
+    trackers = [interceptors.TestingLossTracker({'test': ['MSELoss']}),
+                interceptors.Timer(),
+                interceptors.TestingAccuracyTracker(['test']),
+                previous_param_provider,
+                initial_param_provider,
+                interceptors.TestLoop('test', 
+                                   test_dataloader, 
+                                   criterions={'MSELoss' : batch_losses.MSELoss(per_sample=False, 
+                                                                                                 reduction='sum')}, 
+                                   device=DEVICE),
+                interceptors.EnergyL1NetworkTracker(previous_param_provider), # need handlers too
+                interceptors.MinimumEnergyL1NetworkTracker(initial_param_provider)]
+    new_optimizer = torch.optim.AdamW(new_model.parameters(), lr=0.00025, weight_decay=0.0)
+    trainer = trainers.Trainer(new_model, 
+                               N_NETWORKS, 
+                               new_optimizer, 
+                               criterion1, 
+                               train_dataloader, 
+                               test_dataloader, 
+                               trackers=trackers, 
+                               device=DEVICE)
+    trainer.train_loop(10, 0.05, sample_increment=1)
+    print(np.array(trainer.state['data']['test_accuracies']['test']))
+    d4 = trainer.state['data']
+
     
 
 # TODO: Make trainer even more general, more observers (i.e. counts), lazy losses, data, init

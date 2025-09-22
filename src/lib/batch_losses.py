@@ -1,7 +1,8 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-
+import numpy as np
+# TODO: I think MSE should always average the outputs and reduction only applies to batch
 class MSELoss(nn.Module):
     def __init__(self, per_sample=False, reduction='mean'):
         """
@@ -36,6 +37,80 @@ class MSELoss(nn.Module):
 
         return loss
     
+class MAELoss(nn.Module):
+    def __init__(self, per_sample=False, reduction='mean'):
+        """
+        Args:
+            reduction (str): The reduction operation to apply: 'mean' or 'sum'.
+            per_sample (bool): If True, reduces over feature dimensions to get a loss
+                               per sample. If False, reduces over all dimensions to
+                               get a single loss for the batch.
+        """
+        super().__init__()
+        if reduction not in ['mean', 'sum']:
+            raise ValueError(f"Invalid reduction type: {reduction}. Must be 'mean' or 'sum'.")
+        self.reduction = reduction
+        self.per_sample = per_sample
+        # initialize the core loss function to get per-element losses
+        self.loss_fn = nn.L1Loss(reduction='none')
+
+    def forward(self, y_hat, y, idx=None) -> torch.Tensor:
+        unreduced_loss = self.loss_fn(y_hat, y)
+        if self.per_sample:
+            # reduce only output dim
+            dims_to_reduce = -1
+        else:
+            # reduce batch and output dim
+            dims_to_reduce = (0, -1)
+
+
+        if self.reduction == 'mean':
+            loss = torch.mean(unreduced_loss, dim=dims_to_reduce)
+        else: # self.reduction == 'sum'
+            loss = torch.sum(unreduced_loss, dim=dims_to_reduce)
+
+        return loss
+
+class HingeLoss(nn.Module):
+    def __init__(self, per_sample=False, reduction='sum', margin=1.0):
+        """
+        Args:
+            reduction (str): The reduction operation to apply: 'mean' or 'sum'.
+            per_sample (bool): If True, reduces over feature dimensions to get a loss
+                               per sample. If False, reduces over all dimensions to
+                               get a single loss for the batch.
+            margin (float or list): the safety margin required between the target neuron 
+                            activity and incorrect neuron activities.
+        """
+        super().__init__()
+        if reduction not in ['mean', 'sum']:
+            raise ValueError(f"Invalid reduction type: {reduction}. Must be 'mean' or 'sum'.")
+        self.reduction = reduction
+        self.per_sample = per_sample
+        if isinstance(margin, torch.Tensor) and len(margin.shape) == 1:
+            margin = margin.unsqueeze(0).unsqueeze(-1)
+        elif isinstance(margin, (np.ndarray, list)):
+            #                             batch_dim    output_dim 
+            margin = torch.tensor(margin).unsqueeze(0).unsqueeze(-1)
+        self.margin = margin
+
+    def forward(self, y_hat, y, idx=None):
+        self.margin = self.margin.to(y_hat.device)
+        
+        target_activities = torch.sum(y_hat * y, dim=-1, keepdim=True)
+        margins = self.margin + y_hat - target_activities
+        loss_terms = F.relu(margins)
+        unreduced_loss = loss_terms * (y < 1)
+        if self.per_sample:
+            dims_to_reduce = -1
+        else:
+            dims_to_reduce = (0, -1)
+        if self.reduction == 'mean':
+            loss = torch.mean(unreduced_loss, dim=dims_to_reduce)
+        else: # self.reduction == 'sum'
+            loss = torch.sum(unreduced_loss, dim=dims_to_reduce)
+        return loss
+
 class CrossEntropyLoss(nn.Module):
     def __init__(self, per_sample=False, reduction='mean'):
         """
@@ -86,7 +161,6 @@ class LazyLoss(nn.Module):
             else:
                 loss = torch.sum(per_sample_losses, dim=0)
         return loss
-
     
 class StatefulLazyLoss(nn.Module):
     def __init__(self, loss_fn, max_samples, n_networks, device, reduction='mean', per_sample=True, padding_value=-1):

@@ -136,6 +136,50 @@ class BatchLinearMasked(nn.Module):
                                     + self.biases * self.bias_mask)
         return x
 
+# https://arxiv.org/abs/2407.10780
+class BatchDecorrelation(nn.Module):
+    def __init__(self, n_networks, n_in, decor_lr=1e-5, mu_lr=0.1):
+        super().__init__()
+        self.n_in = n_in
+        self.n_networks = n_networks
+        
+        if isinstance(decor_lr, torch.Tensor) and len(decor_lr.shape) == 1:
+            decor_lr = decor_lr.unsqueeze(0).unsqueeze(-1)
+        elif isinstance(decor_lr, (np.ndarray, list)):
+            #                                  input_dim   output_dim 
+            decor_lr = torch.tensor(decor_lr, dtype=torch.float).unsqueeze(-1).unsqueeze(-1)
+        
+        if isinstance(mu_lr, torch.Tensor) and len(mu_lr.shape) == 1:
+            mu_lr = mu_lr.unsqueeze(0).unsqueeze(-1)
+            mu_lr.requires_grad = False
+        elif isinstance(mu_lr, (np.ndarray, list)):
+            mu_lr = torch.tensor(mu_lr, requires_grad=False, dtype=torch.float).unsqueeze(0).unsqueeze(-1)
+            
+        self.register_buffer('mu_lr', mu_lr)
+        self.register_buffer('decor_lr', decor_lr)
+        self.M = nn.Parameter(torch.eye(n_in, requires_grad=False)
+                              .unsqueeze(0).repeat(n_networks, 1, 1),
+                              requires_grad=False)
+        self.register_buffer('mu', torch.zeros((1, n_networks, n_in), requires_grad=False))
+        
+    def forward(self, x):
+        x = x - self.mu
+        x_hat = torch.einsum('bni,nii->bni', x, self.M)
+        
+        if self.training: # update M only when training
+            with torch.no_grad(): # we don't want to use autograd
+                # I think alg. uses mean x_i (x_i would imply full-batch but then dims don't match) 
+                #                                          |
+                self.mu = self.mu + self.mu_lr * (torch.mean(x, dim=0) - self.mu)
+                C = torch.einsum('bni,bnj->nji', x_hat, x_hat) # j = i NOTE C: (n,j,i)
+                x_sq = torch.mean(x**2, dim=0)
+                x_hat_sq = torch.mean(x_hat**2, dim=0)
+                g = torch.sqrt(x_sq/x_hat_sq).unsqueeze(-1) # (n, j, 1)
+                
+                update = torch.einsum('njk,nik->nji', C, self.M) # n, j, i where j = i
+                self.M.data = g * (self.M - self.decor_lr*update) # g gets broadcast along last dim
+        return x_hat
+
 
 # Gemini-Pro used for handling list-like kwargs
 def _init_weights(weights, method, **kwargs):
