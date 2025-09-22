@@ -231,7 +231,7 @@ def sampler_samples_test():
 if __name__ == '__main__':
     DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
     N_NETWORKS = 5
-    BATCH_SIZE = 32
+    BATCH_SIZE = 1
     N_IN = 784
     N_HID = 100
     N_OUT = 10
@@ -286,9 +286,9 @@ if __name__ == '__main__':
                                                         init_config={'a' : -1/np.sqrt(784),
                                                                      'b' : 1/np.sqrt(784)}
                                                         ),
-                          trainables.BatchDecorrelation(N_NETWORKS, N_HID, 
-                                                        decor_lr=[1e-4, 1e-5, 1e-6, 1e-7, 1e-8],
-                                                        mu_lr=np.linspace(0.01, 0.1, 5)),
+                          # trainables.BatchDecorrelation(N_NETWORKS, N_HID, 
+                          #                               decor_lr=[1e-4, 1e-5, 1e-6, 1e-7, 1e-8],
+                          #                               mu_lr=np.linspace(0.01, 0.1, 5)),
                           trainables.BatchLinear(N_NETWORKS, N_HID, N_OUT,
                                                         init_method='uniform',
                                                         init_config={'a' : -1/np.sqrt(100),
@@ -301,7 +301,7 @@ if __name__ == '__main__':
     #                                                         reduction='mean'),
     #                                    per_sample=True,
     #                                    reduction='mean') # note batch_losses
-    criterion1 = batch_losses.HingeLoss(per_sample=True, reduction='mean', margin=torch.linspace(0, 1, 5))
+    criterion1 = batch_losses.HingeLoss(per_sample=True, reduction='mean', margin=torch.linspace(0, 1, 5), device=DEVICE)
     
     previous_param_provider = interceptors.PreviousParameterProvider()
     initial_param_provider = interceptors.InitialParameterProvider()

@@ -72,7 +72,7 @@ class MAELoss(nn.Module):
         return loss
 
 class HingeLoss(nn.Module):
-    def __init__(self, per_sample=False, reduction='sum', margin=1.0):
+    def __init__(self, per_sample=False, reduction='sum', margin=1.0, device='cpu'):
         """
         Args:
             reduction (str): The reduction operation to apply: 'mean' or 'sum'.
@@ -88,15 +88,14 @@ class HingeLoss(nn.Module):
         self.reduction = reduction
         self.per_sample = per_sample
         if isinstance(margin, torch.Tensor) and len(margin.shape) == 1:
-            margin = margin.unsqueeze(0).unsqueeze(-1)
+            margin = margin.unsqueeze(0).unsqueeze(-1).to(device)
         elif isinstance(margin, (np.ndarray, list)):
             #                             batch_dim    output_dim 
-            margin = torch.tensor(margin).unsqueeze(0).unsqueeze(-1)
+            margin = torch.tensor(margin).unsqueeze(0).unsqueeze(-1).to(device)
         self.margin = margin
+        self.device = device
 
     def forward(self, y_hat, y, idx=None):
-        self.margin = self.margin.to(y_hat.device)
-        
         target_activities = torch.sum(y_hat * y, dim=-1, keepdim=True)
         margins = self.margin + y_hat - target_activities
         loss_terms = F.relu(margins)
