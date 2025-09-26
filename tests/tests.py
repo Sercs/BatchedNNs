@@ -230,12 +230,11 @@ def sampler_samples_test():
 #def sampler_test():
 if __name__ == '__main__':
     DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-    N_NETWORKS = 5
+    N_NETWORKS = 14
     BATCH_SIZE = 1
     N_IN = 784
     N_HID = 100
     N_OUT = 10
-    INIT_RANGE = np.linspace(0.005, 0.5, N_NETWORKS)
 
     transform = transforms.Compose([
         transforms.ToTensor(),
@@ -266,18 +265,18 @@ if __name__ == '__main__':
     train_dataloader = DataLoader(train,
                                   #batch_size=1)
                               pin_memory=True,
-                              num_workers=4,
+                              num_workers=0,
                               batch_sampler=s,
                               collate_fn=general_collate)
     
     eval_dataloader = DataLoader(train,
                                  batch_size=16,
-                                 num_workers=4,
+                                 num_workers=0,
                                  shuffle=False)
     print(len(train_dataloader))
     test_dataloader = DataLoader(test,
                               batch_size=16,
-                              num_workers=4,
+                              num_workers=0,
                               shuffle=False)
     
     model = nn.Sequential(trainables.BatchLinear(N_NETWORKS, N_IN, N_HID, 
@@ -285,6 +284,11 @@ if __name__ == '__main__':
                                                         init_method='uniform',
                                                         init_config={'a' : -1/np.sqrt(784),
                                                                      'b' : 1/np.sqrt(784)}
+                                                        ),
+                          trainables.BatchLinear(N_NETWORKS, N_HID, N_HID,
+                                                        init_method='uniform',
+                                                        init_config={'a' : -1/np.sqrt(100),
+                                                                     'b' : 1/np.sqrt(100)}
                                                         ),
                           # trainables.BatchDecorrelation(N_NETWORKS, N_HID, 
                           #                               decor_lr=[1e-4, 1e-5, 1e-6, 1e-7, 1e-8],
@@ -296,12 +300,13 @@ if __name__ == '__main__':
                                                         ),
                           ).to(DEVICE)
     
-    optimizer = torch.optim.SGD(model.parameters(), lr=0.01)
+    optimizer = batch_optimizers.AdamP(model.parameters(), lr=0.0001, degree=np.linspace(0.75, 4, N_NETWORKS))
     # criterion1 = batch_losses.LazyLoss(batch_losses.MSELoss(per_sample=True,
     #                                                         reduction='mean'),
     #                                    per_sample=True,
     #                                    reduction='mean') # note batch_losses
-    criterion1 = batch_losses.HingeLoss(per_sample=True, reduction='mean', margin=torch.linspace(0, 1, 5), device=DEVICE)
+    criterion1 = batch_losses.MSELoss(per_sample=True, 
+                                      reduction='mean')
     
     previous_param_provider = interceptors.PreviousParameterProvider()
     initial_param_provider = interceptors.InitialParameterProvider()
@@ -317,6 +322,7 @@ if __name__ == '__main__':
                                    criterions={'MSELoss' : batch_losses.MSELoss(per_sample=False, 
                                                                                 reduction='sum')}, 
                                    device=DEVICE),
+                interceptors.EnergyL0NetworkTracker(),
                 interceptors.EnergyL1NetworkTracker(previous_param_provider),
                 interceptors.EnergyL1LayerwiseTracker(previous_param_provider),
                 interceptors.MinimumEnergyL1NetworkTracker(initial_param_provider)]
@@ -333,18 +339,14 @@ if __name__ == '__main__':
                                test_dataloader, 
                                trackers=trackers, 
                                device=DEVICE)
-    trainer.train_loop(1, 0.05, sample_increment=1)
+    trainer.train_loop(2, 0.01, sample_increment=1)
     file_path = os.path.join(outputs_dir, 'experiment1.json')
-    #trainer.save_data_as_json(file_path)
+
     acc = np.array(trainer.state['data']['test_accuracies']['test']).T
     en = np.array(trainer.state['data']['energies_l1']).T
-    print(acc.shape)
-    print(en.shape)
-    print(time.time()-s)
     pal = plt.get_cmap('Reds_r', N_NETWORKS+2)
     for line in range(N_NETWORKS):
         plt.plot(acc[line], en[line], color=pal(line))
-    print(time.time()-s)
     plt.show()
     for line in range(N_NETWORKS):
         plt.plot(acc[line], color=pal(line))

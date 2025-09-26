@@ -183,8 +183,6 @@ class AdamW(torch.optim.Optimizer):
                 corrected_exp_avg = exp_avg / bias_correction1
                 corrected_exp_avg_sq = exp_avg_sq / bias_correction2
                 
-                denom = (exp_avg_sq.div(bias_correction2)).sqrt_().add_(eps)
-                
                 step_size = lr / bias_correction1
                 
                 denom = corrected_exp_avg_sq.sqrt().add_(eps)
@@ -192,6 +190,104 @@ class AdamW(torch.optim.Optimizer):
                 
                 corrected_exp_avg.mul_(step_size)
                 p.addcdiv_(corrected_exp_avg, denom, value=-1) 
+                
+                
+class AdamP(torch.optim.Optimizer):
+    """
+    Implements a from-scratch AdamW optimizer.
+    
+    Supports broadcasting of learning rate, betas, and weight decay
+    for parameters with a leading 'batch' dimension (e.g., shape [n, ...]).
+    Epsilon (eps) is treated as a scalar float.
+    """
+    def __init__(self, params, lr=1e-3, beta1=0.9, beta2=0.999, degree=2.0, eps: float = 1e-8, 
+                 weight_decay=0.0, device='cpu'):
+
+        if not isinstance(eps, float) or eps < 0.0:
+            raise ValueError(f"Epsilon must be a non-negative float, but got {eps}")
+
+        def _process_input(val, name, device):
+            # Helper to convert various inputs to a uniform tensor format
+            if isinstance(val, (float, int, list, np.ndarray)):
+                val = torch.tensor(val, dtype=torch.float32, device=device)
+            if isinstance(val, torch.Tensor):
+                if torch.any(val < 0.0):
+                    raise ValueError(f"Invalid {name} value found in tensor: {val}")
+                return val
+            raise TypeError(f"{name} must be a float, list, np.ndarray, or torch.Tensor")
+
+        processed_lr = _process_input(lr, "learning rate", device)
+        processed_beta1 = _process_input(beta1, "beta1", device)
+        processed_beta2 = _process_input(beta2, "beta2", device)
+        processed_degree = _process_input(degree, 'degree', device)
+        processed_wd = _process_input(weight_decay, "weight_decay", device)
+
+        defaults = dict(lr=processed_lr, beta1=processed_beta1, beta2=processed_beta2,
+                        degree=processed_degree, eps=eps, weight_decay=processed_wd)
+        super().__init__(params, defaults)
+
+    @torch.no_grad()
+    def step(self, closure=None):
+        """Performs a single optimization step with cached checks."""
+        for group in self.param_groups:
+            # Eps is a scalar, retrieve it once per group
+            eps = group['eps']
+            
+            for p in group['params']:
+                if p.grad is None:
+                    continue
+
+                grad = p.grad
+                param_state = self.state[p]
+
+                # one time move
+                if 'step' not in param_state:
+                    param_state['step'] = 0
+                    param_state['exp_avg'] = torch.zeros_like(p)
+                    param_state['exp_avg_sq'] = torch.zeros_like(p)
+                    
+                    # Cache only the hyperparameters that need broadcasting
+                    for name in ['lr', 'beta1', 'beta2', 'degree', 'weight_decay']:
+                        val = group[name]
+                        if isinstance(val, torch.Tensor) and val.shape:
+                            param_state[f'{name}_prepared'] = val.to(p.device).view(-1, *[1] * (p.ndim - 1))
+                        else:
+                            param_state[f'{name}_prepared'] = val
+
+
+                exp_avg, exp_avg_sq = param_state['exp_avg'], param_state['exp_avg_sq']
+                lr = param_state['lr_prepared']
+                beta1 = param_state['beta1_prepared']
+                beta2 = param_state['beta2_prepared']
+                degree = param_state['degree_prepared']
+                weight_decay = param_state['weight_decay_prepared']
+                
+                param_state['step'] += 1
+                
+                if not isinstance(weight_decay, float) or weight_decay != 0.0:
+                    p.mul_(1.0 - lr * weight_decay)
+                
+                # first moment estimate (m_t)
+                exp_avg.mul_(beta1).add_(grad * (1 - beta1)) # alpha expects a scalar but beta1 might be a list
+
+                # second moment estimate (v_t)
+                exp_avg_sq.mul_(beta2).addcmul_(torch.pow(grad.abs(), degree), (1-beta2), value=1.0) # similarly, value expects a scalar
+                #print(degree)                
+                
+                # bias correction (\hat{m_t}, \hat{v_t})
+                bias_correction1 = 1.0 - beta1 ** param_state['step']
+                bias_correction2 = 1.0 - beta2 ** param_state['step']
+                
+                corrected_exp_avg = exp_avg / bias_correction1
+                corrected_exp_avg_sq = exp_avg_sq / bias_correction2
+                
+                step_size = lr / bias_correction1
+                #print(torch.pow(corrected_exp_avg_sq, 1/degree) == torch.pow(corrected_exp_avg_sq, 1/0.25))
+                denom = torch.pow(corrected_exp_avg_sq, 1/degree).add_(eps)
+                step_size = lr
+                
+                corrected_exp_avg.mul_(step_size)
+                p.addcdiv_(corrected_exp_avg, denom, value=-1)
                 
 class LazyAdamW(torch.optim.Optimizer):
     """
@@ -251,14 +347,7 @@ class LazyAdamW(torch.optim.Optimizer):
                         val = group[name]
                         if isinstance(val, torch.Tensor) and val.shape:
                             param_state[f'{name}_prepared'] = val.to(p.device).view(-1, *[1] * (p.ndim - 1))
-                                                                        #                 |
-                                                                        # some lines of code feel like magical runes
-                                                                        # essentially [1,...,1] up to length p.ndim-1
-                                                                        # -1 skips network batch dim
-                                                                        # *[1] then "unpacks" this so we get 1,...,1
-                                                                        # thus .view(-1, 1, ..., 1)
-                                                                        # this accounts for ndim params 
-                                                                        # like bias (n, out) and weights (n, out, in)
+
                         else:
                             param_state[f'{name}_prepared'] = val
 
@@ -290,9 +379,7 @@ class LazyAdamW(torch.optim.Optimizer):
                 
                 corrected_exp_avg = exp_avg / bias_correction1
                 corrected_exp_avg_sq = exp_avg_sq / bias_correction2
-                
-                denom = (exp_avg_sq.div(bias_correction2)).sqrt_().add_(eps)
-                
+
                 step_size = lr / bias_correction1
                 
                 denom = corrected_exp_avg_sq.sqrt().add_(eps)

@@ -27,7 +27,7 @@ if __name__ == '__main__':
     N_HIDs = [100, 100, 100, 100]
     N_OUT = 10
     
-    N_EPOCHS = 20.0
+    N_EPOCHS = 0.5
     TEST_INTERVAL = 0.05
 
     transform = transforms.Compose([
