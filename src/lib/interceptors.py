@@ -884,7 +884,7 @@ class EnergyL0NetworkTracker(Interceptor):
             delta = torch.count_nonzero(p.grad, dim=(tuple(range(1, p.ndim))))
             self.energy_l0 += delta.detach().cpu()
     
-    def after_step(self, state):
+    def after_test(self, state):
         state['data']['energies_l0'].append(self.energy_l0.clone().numpy())
         
 class MinimumEnergyL0NetworkTracker(Interceptor):

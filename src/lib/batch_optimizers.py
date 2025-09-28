@@ -1,5 +1,8 @@
 import torch
 import numpy as np
+from collections import deque
+
+# TODO: Devices!
 
 class SGD(torch.optim.Optimizer):
     """
@@ -191,7 +194,7 @@ class AdamW(torch.optim.Optimizer):
                 corrected_exp_avg.mul_(step_size)
                 p.addcdiv_(corrected_exp_avg, denom, value=-1) 
                 
-                
+# optimum around 2.25        
 class AdamP(torch.optim.Optimizer):
     """
     Implements a from-scratch AdamW optimizer.
@@ -288,6 +291,125 @@ class AdamP(torch.optim.Optimizer):
                 
                 corrected_exp_avg.mul_(step_size)
                 p.addcdiv_(corrected_exp_avg, denom, value=-1)
+
+class NormalizedAdamP(torch.optim.Optimizer):
+    """
+    Implements a from-scratch Adam-style optimizer for a batch of networks.
+
+    This optimizer supports different p-norms (`degree`) for each network in the batch.
+    Crucially, it normalizes the update step of every network to match the
+    magnitude (L2-norm) of the update step of the first network in the batch.
+    This removes the dependency of the learning rate on the p-norm.
+    """
+    def __init__(self, params, lr=1e-3, beta1=0.9, beta2=0.999, degree=2.0,
+                 eps: float = 1e-8, weight_decay=0.0):
+
+        if not isinstance(eps, float) or eps < 0.0:
+            raise ValueError(f"Epsilon must be a non-negative float, but got {eps}")
+
+        # Helper to convert various inputs to a uniform tensor format on the default device
+        def _process_input(val, name):
+            if isinstance(val, (float, int)):
+                return val # Keep scalars as floats
+            if isinstance(val, (list, np.ndarray)):
+                val = torch.tensor(val, dtype=torch.float32)
+            if isinstance(val, torch.Tensor):
+                if torch.any(val < 0.0):
+                    raise ValueError(f"Invalid {name} value found in tensor: {val}")
+                return val
+            raise TypeError(f"{name} must be a float, list, np.ndarray, or torch.Tensor")
+
+        defaults = dict(lr=_process_input(lr, "learning rate"),
+                        beta1=_process_input(beta1, "beta1"),
+                        beta2=_process_input(beta2, "beta2"),
+                        degree=_process_input(degree, 'degree'),
+                        eps=eps,
+                        weight_decay=_process_input(weight_decay, "weight_decay"))
+        super().__init__(params, defaults)
+
+    @torch.no_grad()
+    def step(self, closure=None):
+        """Performs a single optimization step with cross-network normalization."""
+        for group in self.param_groups:
+            eps = group['eps']
+
+            for p in group['params']:
+                if p.grad is None:
+                    continue
+
+                grad = p.grad
+                param_state = self.state[p]
+
+                # State initialization and hyperparameter broadcasting
+                if 'step' not in param_state:
+                    param_state['step'] = 0
+                    param_state['exp_avg'] = torch.zeros_like(p)
+                    param_state['exp_avg_sq'] = torch.zeros_like(p)
+                    
+                    for name in ['lr', 'beta1', 'beta2', 'degree', 'weight_decay']:
+                        val = group[name]
+                        # If val is a tensor and param is batched, prepare for broadcasting
+                        if isinstance(val, torch.Tensor) and p.ndim > 0 and val.numel() > 1:
+                            param_state[f'{name}_prepared'] = val.to(p.device).view(-1, *[1] * (p.ndim - 1))
+                        else:
+                            param_state[f'{name}_prepared'] = val
+
+                exp_avg, exp_avg_sq = param_state['exp_avg'], param_state['exp_avg_sq']
+                lr = param_state['lr_prepared']
+                beta1 = param_state['beta1_prepared']
+                beta2 = param_state['beta2_prepared']
+                degree = param_state['degree_prepared']
+                weight_decay = param_state['weight_decay_prepared']
+                
+                param_state['step'] += 1
+                
+                # Decoupled weight decay (AdamW style)
+                if not isinstance(weight_decay, float) or weight_decay != 0.0:
+                    p.mul_(1.0 - lr * weight_decay)
+                
+                # First moment estimate (m_t)
+                exp_avg.mul_(beta1).add_(grad, alpha=1.0 - beta1)
+
+                # Second moment estimate (v_t)
+                grad_abs_p = torch.pow(grad.abs(), degree)
+                exp_avg_sq.mul_(beta2).add_(grad_abs_p, alpha=1.0 - beta2)
+                
+                # Bias correction
+                bias_correction1 = 1.0 - beta1 ** param_state['step']
+                bias_correction2 = 1.0 - beta2 ** param_state['step']
+                
+                m_hat = exp_avg / bias_correction1
+                v_hat = exp_avg_sq / bias_correction2
+                
+                # --- NORMALIZATION LOGIC ---
+
+                # 1. Calculate the un-normalized update vector for the entire batch
+                denom = torch.pow(v_hat, 1.0 / degree).add_(eps)
+                unnormalized_update = m_hat / denom
+                
+                # Check if this parameter is batched and has more than one network
+                is_batched = p.ndim > 0 and p.shape[0] > 1
+
+                if is_batched:
+                    # 2. Calculate the L2-norm of the update for each network in the batch
+                    update_norms = torch.linalg.vector_norm(unnormalized_update, dim=tuple(range(1, unnormalized_update.ndim)))
+                    
+                    # 3. Get the reference norm (from the first network)
+                    reference_norm = update_norms[0]
+                    
+                    # 4. Compute the scaling factor to match the reference norm
+                    scale_factor = reference_norm / (update_norms + eps)
+                    
+                    # Reshape for broadcasting: from [n] to [n, 1, 1, ...]
+                    scale_factor = scale_factor.view(-1, *[1] * (p.ndim - 1))
+                    
+                    # 5. Apply the scaled update
+                    final_update = lr * unnormalized_update * scale_factor
+                    p.add_(final_update, alpha=-1.0)
+                else:
+                    # Original update for non-batched or single-network parameters
+                    final_update = lr * unnormalized_update
+                    p.add_(final_update, alpha=-1.0)
                 
 class LazyAdamW(torch.optim.Optimizer):
     """
@@ -390,4 +512,3 @@ class LazyAdamW(torch.optim.Optimizer):
                 # which networks actually have gradients and therefore require updating
                 corrected_exp_avg.mul_(update_needed)
                 p.addcdiv_(corrected_exp_avg, denom, value=-1) 
-
