@@ -1004,12 +1004,13 @@ class EnergyL0NetworkHandler(Handler):
         }
 
     def before_train_log(self, state):
-        self.energy_l0 = torch.zeros((state['n_networks'],))
+        self.energy_l0 = torch.zeros((state['n_networks'],), dtype=torch.int32)
         state['data']['energies_l0'] = []
         
         # before step, after loss = grads available
     def before_step_func(self, n, p, state):
-        delta = torch.count_nonzero(p.grad, dim=(tuple(range(1, p.ndim))))
+        delta = torch.sum(p.grad.abs() > 0, dim=(tuple(range(1, p.ndim))), dtype=torch.int32)
+        print(delta)
         self.energy_l0 += delta.detach().cpu()
     
     def after_test_log(self, state):

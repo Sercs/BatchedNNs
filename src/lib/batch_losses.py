@@ -20,7 +20,7 @@ class MSELoss(nn.Module):
         # initialize the core loss function to get per-element losses
         self.loss_fn = nn.MSELoss(reduction='none')
 
-    def forward(self, y_hat, y, idx=None) -> torch.Tensor:
+    def forward(self, y_hat, y, idx=None):
         unreduced_loss = self.loss_fn(y_hat, y)
         if self.per_sample:
             # reduce only output dim
@@ -54,7 +54,7 @@ class MAELoss(nn.Module):
         # initialize the core loss function to get per-element losses
         self.loss_fn = nn.L1Loss(reduction='none')
 
-    def forward(self, y_hat, y, idx=None) -> torch.Tensor:
+    def forward(self, y_hat, y, idx=None):
         unreduced_loss = self.loss_fn(y_hat, y)
         if self.per_sample:
             # reduce only output dim
@@ -127,7 +127,7 @@ class CrossEntropyLoss(nn.Module):
         # initialize the core loss function to get per-element losses
         self.loss_fn = nn.CrossEntropyLoss(reduction='none')
 
-    def forward(self, y_hat, y, idx=None) -> torch.Tensor:
+    def forward(self, y_hat, y, idx=None):
         unreduced_loss = self.loss_fn(y_hat.transpose(1, -1), y.transpose(1, -1))
         if self.per_sample:
             loss = unreduced_loss # cross entropy is already per-sample

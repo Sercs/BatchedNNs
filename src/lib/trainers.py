@@ -108,15 +108,15 @@ class Trainer():
                     # quick prints for stats
                     # TODO: probably could make an interceptor print all the data we want
                     print(self.state['data']['time_taken'][-1])
-                    #print(self.state['data']['test_accuracies']['test'][-1])
+                    print(self.state['data']['test_accuracies']['test'][-1])
                     # print(self.state['data']['energies_l1_layerwise'])
                     # print(self.state['data']['minimum_energies_l1_layerwise'])
                     #print(self.state['data']['energies_l1'][-1])
                     #print(self.state['data']['minimum_energies_l1'][-1])
                     # print(self.state['data']['energies_l2'][-1])
                     # print(self.state['data']['minimum_energies_l2'][-1])
-                    # print(self.state['data']['energies_l0'][-1])
-                    # print(self.state['data']['minimum_energies_l0'][-1])
+                    print(self.state['data']['energies_l0'][-1])
+                    #print(self.state['data']['minimum_energies_l0'][-1])
                     test_epoch = 0
                     
                 if stop_on_sample > 0 and sample_counter > stop_on_sample:

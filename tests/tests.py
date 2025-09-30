@@ -241,7 +241,7 @@ if __name__ == '__main__':
     N_OUT = 10
     DEGREES = np.logspace(-1, 1.5, N_NETWORKS-1)
     DEGREES = np.append(2, DEGREES)
-    LR = 0.0001 #np.logspace(-5, -3, N_NETWORKS)
+    LR = 0.01 #np.logspace(-5, -3, N_NETWORKS)
 
 
     transform = transforms.Compose([
@@ -273,7 +273,7 @@ if __name__ == '__main__':
     train_dataloader = DataLoader(train,
                                   #batch_size=1)
                               pin_memory=True,
-                              num_workers=4,
+                              num_workers=0,
                               batch_sampler=s,
                               collate_fn=general_collate)
     
@@ -303,18 +303,21 @@ if __name__ == '__main__':
                                                         ),
                           ).to(DEVICE)
     
-    optimizer = batch_optimizers.LBFGS(model.parameters(), history_size=20)
+    optimizer = batch_optimizers.SGD(model.parameters(), lr=0.01)
     # criterion1 = batch_losses.LazyLoss(batch_losses.MSELoss(per_sample=True,
     #                                                         reduction='mean'),
     #                                    per_sample=True,
     #                                    reduction='mean') # note batch_losses
+    
     criterion1 = batch_losses.MSELoss(per_sample=True, 
                                       reduction='mean')
-    
+
     previous_param_provider = interceptors.PreviousParameterProvider()
     initial_param_provider = interceptors.InitialParameterProvider()
     prev_prev_param_provider = interceptors.PreviousPreviousParameterProvider(previous_param_provider)
     
+    
+    handlers = [interceptors.EnergyL0NetworkHandler()]
     trackers = [interceptors.Timer(),
                 interceptors.TestingLossTracker({'test': ['MSELoss']}),
                 interceptors.TestingAccuracyTracker(['test']),
@@ -325,10 +328,12 @@ if __name__ == '__main__':
                                    criterions={'MSELoss' : batch_losses.MSELoss(per_sample=False, 
                                                                                 reduction='sum')}, 
                                    device=DEVICE),
-                interceptors.EnergyL0NetworkTracker(),
+                interceptors.BackwardPassCounter(),
+                #interceptors.EnergyL0NetworkTracker(),
                 interceptors.EnergyL1NetworkTracker(previous_param_provider),
                 interceptors.EnergyL1LayerwiseTracker(previous_param_provider),
-                interceptors.MinimumEnergyL1NetworkTracker(initial_param_provider)]
+                #interceptors.MinimumEnergyL1NetworkTracker(initial_param_provider),
+                interceptors.ParameterIterator(handlers)]
     
     s=time.time()
     
@@ -342,7 +347,7 @@ if __name__ == '__main__':
                                test_dataloader, 
                                trackers=trackers, 
                                device=DEVICE)
-    trainer.train_loop(3*BATCH_SIZE, 0.01, sample_increment=1)
+    trainer.train_loop(0.05, 0.01, sample_increment=1)
     
     d=utils.convert_data(trainer.state['data'])
         #data.append(copy.deepcopy(d))

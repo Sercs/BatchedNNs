@@ -20,8 +20,8 @@ def save_data(file_name, data):
         json.dump(data, f, indent=4, sort_keys=True)
 
 # loads data into default python types
-def load_data(file_name):
-    with open(file_name + ".json", "r") as f:
+def load_data(file_name, extension='.json'):
+    with open(file_name + extension, "r") as f:
         data = json.load(f)
     return data
 

@@ -1,4 +1,7 @@
+import matplotlib.pyplot as plt
 import numpy as np
+import json
+import os
 
 # Gemini-2.5 Pro
 def pluck_masked_values(search_array, # filter items against
@@ -100,3 +103,41 @@ def convert_data(data_dict):
             elif isinstance(value, list):
                 data_dict[key] = np.array(value)
     return data_dict
+
+def save_data(file_name, data):
+    with open(file_name + ".json", "w") as f:
+        json.dump(data, f, indent=4, sort_keys=True)
+
+# loads data into default python types
+def load_data(file_name, extension='.json'):
+    with open(file_name + extension, "r") as f:
+        data = json.load(f)
+    return data
+
+def get_palettes(colors, n_colors, names=None):
+    if names is None:
+        return [plt.get_cmap(c, n_colors) for n, c in enumerate(colors)]
+    else:
+        return {names[n] : plt.get_cmap(c, n_colors) for n, c in enumerate(colors)}
+    
+    
+def get_and_filter_data(include, exclude, path='./', extension='.json'):
+    directory = os.listdir(path)  
+    return {name : convert_data(load_data(path+name, extension=''))
+                for name in directory
+                    if name.endswith(extension)
+                    if not include or     all(yes in name for yes in include)
+                    if not exclude or not any(nope in name for nope in exclude)}
+
+def order_data(data, desired_name_order):
+    target_order = []
+    i = 0
+    for _ in data.keys():
+        for k in data.keys():
+            if desired_name_order[i] in k:
+                target_order.append(k)
+                i += 1
+                break
+        if i == len(desired_name_order):
+            break
+    return {k: data[k] for k in target_order}
