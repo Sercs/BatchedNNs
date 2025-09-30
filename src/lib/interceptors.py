@@ -875,7 +875,7 @@ class EnergyL2NetworkTracker(Interceptor):
         
 class EnergyL0NetworkTracker(Interceptor):
     def before_train(self, state):
-        self.energy_l0 = torch.zeros((state['n_networks'],))
+        self.energy_l0 = torch.zeros((state['n_networks'],), dtype=torch.long)
         state['data']['energies_l0'] = []
         
         # before step, after loss = grads available
@@ -892,7 +892,7 @@ class MinimumEnergyL0NetworkTracker(Interceptor):
         self.provider = initial_parameter_provider
         
     def before_train(self, state):
-        self.minimum_energy_l0 = torch.zeros((state['n_networks'],))
+        self.minimum_energy_l0 = torch.zeros((state['n_networks'],), dtype=torch.long)
         state['data']['minimum_energies_l0'] = []
     
     def after_test(self, state):
@@ -1004,13 +1004,12 @@ class EnergyL0NetworkHandler(Handler):
         }
 
     def before_train_log(self, state):
-        self.energy_l0 = torch.zeros((state['n_networks'],), dtype=torch.int32)
+        self.energy_l0 = torch.zeros((state['n_networks'],), dtype=torch.long)
         state['data']['energies_l0'] = []
         
         # before step, after loss = grads available
     def before_step_func(self, n, p, state):
-        delta = torch.sum(p.grad.abs() > 0, dim=(tuple(range(1, p.ndim))), dtype=torch.int32)
-        print(delta)
+        delta = torch.count_nonzero(p.grad, dim=(tuple(range(1, p.ndim))))
         self.energy_l0 += delta.detach().cpu()
     
     def after_test_log(self, state):

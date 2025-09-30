@@ -329,11 +329,11 @@ if __name__ == '__main__':
                                                                                 reduction='sum')}, 
                                    device=DEVICE),
                 interceptors.BackwardPassCounter(),
-                #interceptors.EnergyL0NetworkTracker(),
+                interceptors.EnergyL0NetworkTracker(),
                 interceptors.EnergyL1NetworkTracker(previous_param_provider),
-                interceptors.EnergyL1LayerwiseTracker(previous_param_provider),
+                interceptors.EnergyL1LayerwiseTracker(previous_param_provider)]
                 #interceptors.MinimumEnergyL1NetworkTracker(initial_param_provider),
-                interceptors.ParameterIterator(handlers)]
+                #interceptors.ParameterIterator(handlers)]
     
     s=time.time()
     

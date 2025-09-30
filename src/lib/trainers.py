@@ -115,7 +115,7 @@ class Trainer():
                     #print(self.state['data']['minimum_energies_l1'][-1])
                     # print(self.state['data']['energies_l2'][-1])
                     # print(self.state['data']['minimum_energies_l2'][-1])
-                    print(self.state['data']['energies_l0'][-1])
+                    #print(self.state['data']['energies_l0'][-1])
                     #print(self.state['data']['minimum_energies_l0'][-1])
                     test_epoch = 0
                     
