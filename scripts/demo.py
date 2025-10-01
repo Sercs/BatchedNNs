@@ -194,7 +194,7 @@ if __name__ == '__main__':
     print_state_data_structure(trainer.state['data']) # get the structure of the data we collected (dict and keys)
     # optionally save
     # writes json file with trainer.state['data'] and optional experimental setup
-    # trainer.save_data_as_json('./demo', experimental_setup={'initial_conditions' : {'layer 1' : 1/np.sqrt(784),
+    # trainer.save_data_as_json('./demo.json', experimental_setup={'initial_conditions' : {'layer 1' : 1/np.sqrt(784),
     #                                                                                 'layer 2' : 1/np.sqrt(np.array(N_HIDS))},
     #                                                         'n_hids' : N_HIDS,
     #                                                         'dataset_sizes' : np.linspace(10_000, 60_000, N_NETWORKS),
@@ -203,6 +203,9 @@ if __name__ == '__main__':
     #                                                         'L2reg' : np.logspace(np.log10(1e-2), np.log10(1e-6), N_NETWORKS),
     #                                                         'train method' : 'loop'}
     print("#############################################")
+    
+    # a core idea of this code is to use only what you want
+    # here we run the network a second time but this time include only the timer
     s = time.time()
     trainer = trainers.Trainer(model, 
                                N_NETWORKS, 
@@ -210,11 +213,9 @@ if __name__ == '__main__':
                                criterion1, 
                                train_dataloader, 
                                test_dataloader, 
-                               trackers=[interceptors.Timer()], # or we don't have to include anything 
+                               trackers=[interceptors.Timer()], # we don't have to include anything 
                                device=DEVICE)
-    #         when used mixed dataset sizes, we need to know how often to test, so we use manual references
-    # train for 5% total epoch and test every 1%       |
-    #                      |                           |
+
     trainer.train_loop(0.05, 0.01, dataset_size=60_000, sample_increment=1)
     print("Time taken with no trackers:", time.time()-s)
     print("Data saved:")
