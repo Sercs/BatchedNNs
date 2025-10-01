@@ -42,14 +42,15 @@ if __name__ == '__main__':
     train = dm.DatasetWithIdx(train_dataset, task='classify') # returns idx for tracking
     test = dm.DatasetWithIdx(test_dataset, task='classify')
     
+    # incurs a start up cost on epoch of about 5 seconds
     s=samplers.VaryBatchAndDatasetSizeSampler(
-        train, N_NETWORKS, dataset_sizes=np.linspace(10_000, 60_000, N_NETWORKS), 
-        batch_sizes=[int(2**i) for i in np.linspace(0, 4, N_NETWORKS)], 
+        train, N_NETWORKS, dataset_sizes=np.linspace(10_000, 60_000, N_NETWORKS),  # vary dataset_size
+        batch_sizes=[int(2**i) for i in np.linspace(0, 4, N_NETWORKS)], # vary batch_size
         method='loop', # since small dataset sizes and large batches will hit epoch faster
                        # we can either:
                        #   - loop and waste no resources (but making defining epoch harder on the user)
                        #   - buffer and waste resources on the end (mostly used because it was easy)
-                       #   - stretch and distribute wasted resources (makes it better with test intervals)
+                       #   - stretch and distribute wasted resources (makes it better with test intervals, i.e. testing 5% of 60,000 ~= testing 5% of 1,000) 
         order='identical' # ensures networks see the same items and if possible, at the same time
                           # wouldn't happen here due to the different dataset sizes
                           # 'random' gives each network its own dataset of random items
@@ -68,11 +69,11 @@ if __name__ == '__main__':
                                  num_workers=4,
                                  shuffle=False)
 
-    test_dataloader = DataLoader(test,
+    test_dataloader = DataLoader(test, # note test
                               batch_size=16,
                               num_workers=4,
                               shuffle=False)
-                             # BatchLinear is the default BatchLinearMasked implements multi-sized networks
+                             # BatchLinear is the default BatchLinearMasked implements multi-sized networks (it will likely become an interceptor though)
     model = nn.Sequential(trainables.BatchLinearMasked(N_NETWORKS, N_IN, N_HIDS, # note that n_hids is a list
                                                         activation=nn.GELU(),
                                                         init_method='uniform',
@@ -88,6 +89,7 @@ if __name__ == '__main__':
              # batch_optimizers implements SGD-M and Adam(W) for batched hyperparameters
     optimizer = batch_optimizers.AdamW(model.parameters(), lr=np.linspace(0.0001, 0.001, N_NETWORKS),
                                                            beta1=np.linspace(0.5, 0.9, N_NETWORKS),
+                                                          #beta2=(0.999) i.e. default 
                                                            device=DEVICE)
     criterion1 = batch_losses.MSELoss(per_sample=True, reduction='mean')
     
@@ -158,13 +160,13 @@ if __name__ == '__main__':
                                                                            # but if these samples come from a 
                                                                            # 60_000 dataset we need to know those 
                                                                            # which of those 60_000 idxs the 10 are.
-                prev_prev_param_provider, # order matters here since this relies on previous_param_provider
+                prev_prev_param_provider, # order matters here since we want this to record previous parameters BEFORE pervious parameters overwrites
                 previous_param_provider, # used by energy interceptors and handlers
                 initial_param_provider,                                   # if we used previous parameters, we'd get zeros
                                                                           #                        |
                 interceptors.L1Regularizer(np.logspace(np.log10(1e-6), np.log10(1e-2), N_NETWORKS), prev_prev_param_provider),
                 
-                                                        # we can simultaneuosly regularize L2 norm against the initial condition (never tried this but just demo-ing)
+                                                        # we can simultaneuosly regularize L2 norm against the initial condition
                                                         #                                      |
                 interceptors.L2Regularizer(np.logspace(np.log10(1e-2), np.log10(1e-6), N_NETWORKS), initial_param_provider), # this improves E_min but doesn't help E
                 interceptors.EnergyL1NetworkTracker(previous_param_provider), # we have handlers of these too
@@ -192,7 +194,7 @@ if __name__ == '__main__':
     print_state_data_structure(trainer.state['data']) # get the structure of the data we collected (dict and keys)
     # optionally save
     # writes json file with trainer.state['data'] and optional experimental setup
-    # trainer.save_data_as_json('./demo', experimental_setup={'initial_conditions' : {'layer 1' : np.sqrt(784),
+    # trainer.save_data_as_json('./demo', experimental_setup={'initial_conditions' : {'layer 1' : 1/np.sqrt(784),
     #                                                                                 'layer 2' : 1/np.sqrt(np.array(N_HIDS))},
     #                                                         'n_hids' : N_HIDS,
     #                                                         'dataset_sizes' : np.linspace(10_000, 60_000, N_NETWORKS),

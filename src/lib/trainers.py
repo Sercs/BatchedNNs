@@ -108,7 +108,7 @@ class Trainer():
                     # quick prints for stats
                     # TODO: probably could make an interceptor print all the data we want
                     print(self.state['data']['time_taken'][-1])
-                    print(self.state['data']['test_accuracies']['test'][-1])
+                    #print(self.state['data']['test_accuracies']['test'][-1])
                     # print(self.state['data']['energies_l1_layerwise'])
                     # print(self.state['data']['minimum_energies_l1_layerwise'])
                     #print(self.state['data']['energies_l1'][-1])

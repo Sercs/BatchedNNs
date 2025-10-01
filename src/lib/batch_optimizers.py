@@ -3,6 +3,7 @@ import numpy as np
 from collections import deque
 
 # TODO: Devices!
+# TODO: Competitive plasticity
 
 class SGD(torch.optim.Optimizer):
     """

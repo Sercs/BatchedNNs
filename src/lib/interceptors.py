@@ -1,6 +1,6 @@
 # TODO: sleep epochs
+# TODO: Generalize energy measures, better calculated metrics
 # TODO [minor]: weight masking, providers as handlers, std
-# TODO: potential optimization with CPU/GPU syncing
 import torch
 import numpy as np
 import time

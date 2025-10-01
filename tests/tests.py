@@ -290,16 +290,16 @@ if __name__ == '__main__':
     model = nn.Sequential(trainables.BatchLinear(N_NETWORKS, N_IN, N_HID, 
                                                         activation=nn.GELU(),
                                                         init_method='uniform',
-                                                        init_config={'a' : -1/np.sqrt(784),
-                                                                     'b' : 1/np.sqrt(784)}
+                                                        init_config={'a' : -1/np.power(784, 0.5),
+                                                                     'b' :1/np.power(784, 0.5)}
                                                         ),
                           # trainables.BatchDecorrelation(N_NETWORKS, N_HID, 
                           #                               decor_lr=[1e-4, 1e-5, 1e-6, 1e-7, 1e-8],
                           #                               mu_lr=np.linspace(0.01, 0.1, 5)),
                           trainables.BatchLinear(N_NETWORKS, N_HID, N_OUT,
                                                         init_method='uniform',
-                                                        init_config={'a' : -1/np.sqrt(100),
-                                                                     'b' : 1/np.sqrt(100)}
+                                                        init_config={'a' : -1/np.power(100, 0.5),
+                                                                     'b' : 1/np.power(100, 0.5)}
                                                         ),
                           ).to(DEVICE)
     
