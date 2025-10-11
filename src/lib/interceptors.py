@@ -1,8 +1,12 @@
 # TODO: sleep epochs
 # TODO: Generalize energy measures, better calculated metrics
 # TODO [minor]: weight masking, providers as handlers, std
+
+from lib.trainables import BatchLinear
 import torch
+import torch.nn as nn
 import numpy as np
+import math
 import time
 """
     PyTorch-Lightning inspired.
@@ -15,8 +19,6 @@ class Interceptor:
     def __init__(self):
         # this will be populated by the Trainer upon initialization.
         self.trainer = None
-    def get_x(self, state): pass # testing
-    
     # main function listeners
     def before_train(self, state): pass
     def after_train(self, state): pass
@@ -94,14 +96,14 @@ class TestLoop(Interceptor):
     This observer listens for the 'on_test_run' event fired by the Trainer.
     """
     
-    def __init__(self, name, test_dataloader, criterions, device='cpu'):
+    def __init__(self, name, test_dataloader, criterions):
         self.name = name
         self.test_dataloader = test_dataloader
-        self.criterions = {name: crit.to(device) for name, crit in criterions.items()}
-        self.device = device
+        self.criterions = {name: crit for name, crit in criterions.items()}
         self.trainer = None # this will be set by the Trainer
 
     def on_test_run(self, state):
+        self.device = state['device']
         # set the current context so other observers know which dataset is being tested.
         state['current_test_context'] = self.name
         
@@ -141,6 +143,133 @@ class TestLoop(Interceptor):
 """
 These Interceptors deal with metrics like wall clock speed, losses and accuracies.
 """
+# gemini-flash with hand-holding
+class ResultPrinter(Interceptor):
+    """
+    Interceptor that prints specified metrics after every test run.
+    Uses a single recursive method to handle arbitrary nested dictionary configurations
+    with a minimal, indented output style.
+    """
+    def __init__(self, metrics):
+        super().__init__()
+        self.metrics_config = metrics
+
+    def _format_result(self, latest_result):
+        """Helper to format a single scalar or tensor value into a string."""
+        if isinstance(latest_result, (float, int, np.float64)):
+            # Scalar result
+            return f"{latest_result:.5f}"
+        
+        elif isinstance(latest_result, (np.ndarray, torch.Tensor)):
+            # Array/Tensor result (prints all values)
+            if isinstance(latest_result, torch.Tensor):
+                latest_result = latest_result.cpu().numpy()
+            
+            formatted_values = [f"{v:.5f}" for v in latest_result.flatten()]
+            return f"[{', '.join(formatted_values)}]"
+        
+        return str(latest_result)
+
+    def _recursive_print_metric(self, current_data, current_config, indent):
+        """
+        Recursively prints nested metric data based on the structure of current_config.
+        Handles filtering and printing at arbitrary depth using '-' indentation and stacked values.
+        """
+        
+        # 1. Determine targets for this level based on current_config
+        targets = []
+        if current_config is True:
+            targets = list(current_data.keys())
+        elif isinstance(current_config, list):
+            targets = current_config
+        elif isinstance(current_config, dict):
+            targets = list(current_config.keys())
+        else:
+            # Config structure is not dict, list, or True (e.g., reached a value that wasn't a list)
+            return 
+        
+        # 2. Iterate through targets
+        for key in targets:
+            if key not in current_data:
+                continue
+            
+            sub_data = current_data[key]
+            
+            # Determine the sub-filter configuration (the value in the current config dict, or True if not specified)
+            sub_config = current_config.get(key) if isinstance(current_config, dict) else True
+            
+            # Determine the indentation prefix for the label: '-', '--', '---', etc.
+            indent_prefix = '-' * (indent + 1)
+            
+            # --- Base Case Check (Data is a list of historical results) ---
+            if isinstance(sub_data, list):
+                if sub_data:
+                    latest_result = sub_data[-1]
+                    formatted_value = self._format_result(latest_result)
+                    
+                    # Print label: -- Condition 1:
+                    print(f"{indent_prefix} {key.replace('_', ' ').title()}:")
+                    
+                    # Print value on the next line, indented one level deeper (space aligned with prefix)
+                    print(f"{formatted_value}")
+                
+            # --- Recursive Case Check (Data is a dictionary, continue nesting) ---
+            elif isinstance(sub_data, dict):
+                
+                # Print the nesting key header: e.g., - Test Context:
+                print(f"{indent_prefix} {key.replace('_', ' ').title()}:")
+                
+                # Recursive call
+                self._recursive_print_metric(
+                    current_data=sub_data, 
+                    current_config=sub_config, 
+                    indent=indent + 1
+                )
+
+
+    def after_test(self, state):
+        """Prints the most recent value for each configured metric."""
+        
+        if not self.metrics_config:
+            return
+
+        print(f"\nEPOCH {state['epoch']} | RESULTS")
+        
+        for metric_name, config in self.metrics_config.items():
+            if metric_name not in state['data']:
+                print(f"⚠️ WARNING: Metric '{metric_name}' not found.")
+                continue
+            
+            latest_result_history = state['data'][metric_name]
+
+            # Case 1: Simple list-based metrics (e.g., time_taken, running_losses)
+            if isinstance(latest_result_history, list):
+                if config is True and latest_result_history:
+                    latest_result = latest_result_history[-1]
+                    if isinstance(latest_result, (int, float)):
+                        check = True
+                    else:
+                        check = False
+                    formatted_value = self._format_result(latest_result)
+                    
+                    # Print in the new stacked format (no extra line break needed here)
+                    if check:
+                        print(f"{metric_name.replace('_', ' ').title()}: {formatted_value}")
+                    else:
+                        print(f"{metric_name.replace('_', ' ').title()}:") # Print label
+                        print(f"{formatted_value}") # Print value on next line, unindented
+        
+            # Case 2: Nested dictionary metrics
+            elif isinstance(latest_result_history, dict):
+                # Print the root metric name header (e.g., Test Losses:)
+                print(f"{metric_name.replace('_', ' ').title()}:")
+                
+                # Initiate recursion (indent=0 starts with one '-')
+                self._recursive_print_metric(
+                    current_data=latest_result_history, 
+                    current_config=config, 
+                    indent=0
+                )
     
 class Timer(Interceptor):
     def __init__(self):
@@ -452,6 +581,187 @@ class PerSampleBackwardCounter(Interceptor):
     def after_train(self, state):
         state['data']['per_sample_backward_counts'] = self.per_sample_backward_counts.clone().numpy()
 
+########################## NETWORK LOGIC MODIFICAITON ##########################
+# class MaskLinear(Interceptor):
+#     """
+#     Transforms a single BatchLinear module into a masked layer using Interceptor hooks:
+#     1. Generates and registers masks as buffers in __init__ (on CPU).
+#     2. Uses before_*_forward hooks to apply the mask before computation.
+#     3. Registers gradient hooks in before_train to enforce zero gradients during backward pass.
+#     """
+#     def __init__(self, layer, n_ins, n_outs, init_method = None, init_config = None):
+#         super().__init__()
+        
+#         # --- Mandatory Type Check ---
+#         if not isinstance(layer, BatchLinear):
+#             raise TypeError(
+#                 f"MaskLinear received an invalid module type: "
+#                 f"Expected 'BatchLinear', got '{type(layer).__name__}'. "
+#                 "This interceptor only supports BatchLinear modules."
+#             )
+        
+#         # --- Store necessary configuration ---
+#         self.layer = layer
+#         self.n_linears = layer.n_linears
+#         if isinstance(n_ins, int):
+#             n_ins = [n_ins]*self.n_linears
+#         if isinstance(n_outs, int):
+#             n_outs = [n_outs]*self.n_linears
+#         print(n_outs)
+#         n_in, n_out = max(n_ins), max(n_outs)
+#         self.n_in, self.n_out = n_in, n_out
+#         self.n_ins, self.n_outs = n_ins, n_outs
+        
+#         # Ensure dimensional configuration matches n_linears of the single layer
+#         n_linears = self.layer.n_linears
+#         if len(n_ins) != n_linears or len(n_outs) != n_linears:
+#              raise ValueError(f"n_ins and n_outs must have length equal to layer.n_linears ({n_linears}).")
+
+#         # Store config, setting to default empty dict if None was passed
+#         self.init_method = init_method
+#         self.init_config = init_config if init_config is not None else {}
+        
+#         # --- Initialization moved to __init__ ---
+#         self._init_masks()
+#         if self.init_config:
+#             self._init_weights(init_method, **init_config)
+#         self._apply_mask()
+            
+#         #self._initialize_masks_and_weights()
+        
+#     def _init_masks(self):
+#         device = self.layer.weights.device
+#         w_mask = torch.zeros((self.n_linears, self.n_out, self.n_in)).to(device)
+#         b_mask = torch.zeros((self.n_linears, self.n_out)).to(device)
+#         with torch.no_grad():
+#             for i in range(self.n_linears):
+#                 # mask incoming
+#                 n_active_in, n_active_out = self.n_ins[i], self.n_outs[i]
+#                 w_mask[i][:n_active_out, :n_active_in] = torch.ones((n_active_out, n_active_in)).to(device)
+#                 b_mask[i][:n_active_out] = torch.ones((n_active_out,)).to(device)
+#                 print(w_mask[i])
+#         self.layer.register_buffer('weight_mask', w_mask)
+#         self.layer.register_buffer('bias_mask', b_mask)
+        
+#     # since we zero out parts of the tensor we need special handling for fan_in/fan_out.
+#     def _init_weights(self, method, **kwargs):
+#         if method is None:
+#             method = 'kaiming_uniform'
+#             kwargs.setdefault('a', math.sqrt(5))
+            
+#         init_map = {
+#             'uniform': nn.init.uniform_,
+#             'normal': nn.init.normal_,
+#             'kaiming_uniform': nn.init.kaiming_uniform_,
+#             'kaiming_normal': nn.init.kaiming_normal_,
+#             'xavier_uniform': nn.init.xavier_uniform_,
+#             'xavier_normal': nn.init.xavier_normal_,
+#             'zeros': nn.init.zeros_,
+#             'ones': nn.init.ones_,
+#         }
+
+#         method = method.lower()
+        
+#         with torch.no_grad():
+#             for i in range(len(self.layer.weights)):
+#                 current_kwargs = {}
+#                 for key, value in kwargs.items():
+#                     if isinstance(value, (list, np.ndarray)):
+#                         if len(value) != self.n_linears:
+#                             raise ValueError(
+#                                 f"Length of kwarg '{key}' ({len(value)}) must match "
+#                                 f"the number of weights ({self.n_linears})."
+#                             )
+#                         current_kwargs[key] = value[i]
+#                     else:
+#                         current_kwargs[key] = value
+#                 n_active_in, n_active_out = self.n_ins[i], self.n_outs[i]
+#                 init_map[method](self.layer.weights[i][:n_active_out, :n_active_in], **current_kwargs)
+
+#     @torch.no_grad()
+#     def _apply_mask(self):
+#         """
+#         Applies the mask directly to the parameter data. 
+#         """
+#         self.layer.weights.data *= self.layer.weight_mask
+#         self.layer.biases.data *= self.layer.bias_mask
+    
+#     # hooks
+#     def before_train(self, state):
+#         """Registers backward hooks now that the model is on its final device."""
+#         print("Transforming BatchLinear module into a masked layer using Interceptor hooks...")
+#         self.layer.self.layer.weight_mask.to(state['device'])
+#         self.layer.bias_mask = self.layer.bias_mask.to(state['device'])
+
+#         self.layer.weights.register_hook(lambda grad : grad * self.layer.weight_mask)
+#         self.layer.biases.register_hook(lambda grad : grad * self.layer.bias_mask)
+            
+#     def before_train_forward(self, state):
+#         """Apply masks before training forward pass."""
+#         self._apply_mask()
+
+#     def before_test_forward(self, state):
+#         """Apply masks before testing forward pass."""
+#         self._apply_mask()
+        
+class MaskLinear(Interceptor):
+    """
+    Transforms a single BatchLinear module into a masked layer using Interceptor hooks:
+    1. Generates and registers masks as buffers in __init__ (on CPU).
+    2. Uses before_*_forward hooks to apply the mask before computation.
+    3. Registers gradient hooks in before_train to enforce zero gradients during backward pass.
+    """
+    def __init__(self, layer, mask_config):
+        super().__init__()
+        
+        # --- Mandatory Type Check ---
+        if not isinstance(layer, BatchLinear):
+            raise TypeError(
+                f"MaskLinear received an invalid module type: "
+                f"Expected 'BatchLinear', got '{type(layer).__name__}'. "
+                "This interceptor only supports BatchLinear modules."
+            )
+        self.layer = layer
+        
+        self.layer.register_buffer('weight_mask', mask_config['weight_mask'].to(layer.weights.device))
+        self.layer.register_buffer('bias_mask', mask_config['bias_mask'].to(layer.weights.device))
+        
+        self.mask_activities = mask_config['mask_activities']
+        self.mask_gradients = mask_config['mask_gradients']
+        self._apply_mask()
+
+    @torch.no_grad()
+    def _apply_mask(self):
+        """
+        Applies the mask directly to the parameter data. 
+        """
+        if self.mask_activities:
+            self.layer.weights.data *= self.layer.weight_mask
+            self.layer.biases.data *= self.layer.bias_mask
+    
+    # hooks
+    def before_train(self, state):
+        """Registers backward hooks now that the model is on its final device."""
+        print("Transforming BatchLinear module into a masked layer using Interceptor hooks...")
+        
+        if hasattr(self, '_grad_hooks_registered') or not self.mask_gradients:
+            return
+        
+        if self.mask_gradients:
+            print('grads hooked')
+            self.layer.weights.register_hook(lambda grad : grad * self.layer.weight_mask)
+            self.layer.biases.register_hook(lambda grad : grad * self.layer.bias_mask)
+            
+        self._grad_hooks_registered = True
+            
+    def before_train_forward(self, state):
+        """Apply masks before training forward pass."""
+        self._apply_mask()
+
+    def before_test_forward(self, state):
+        """Apply masks before testing forward pass."""
+        self._apply_mask()
+
 # TODO: make batch optimizers [Done!]
 # This is now performed by batch_optimizers
 #              |
@@ -492,7 +802,6 @@ class PerNetworkLearningRate(Interceptor):
 These Interceptors make modifications to the loss function before computing 
 gradints and are therefore useful for auxillary losses like L1/L2 regularization.
 """
-
 class L1Regularizer(Interceptor):
     def __init__(self, lambda_l1=0.01, reference_provider=None):
         super().__init__()
@@ -874,14 +1183,17 @@ class EnergyL2NetworkTracker(Interceptor):
         state['data']['energies_l2'].append(self.energy_l2.clone().numpy())
         
 class EnergyL0NetworkTracker(Interceptor):
+    def __init__(self, previous_parameter_provider):
+        self.provider = previous_parameter_provider
+        
     def before_train(self, state):
         self.energy_l0 = torch.zeros((state['n_networks'],), dtype=torch.long)
         state['data']['energies_l0'] = []
         
-        # before step, after loss = grads available
-    def before_step(self, state):
+    def after_step(self, state):
         for n, p in state['model'].named_parameters():
-            delta = torch.count_nonzero(p.grad, dim=(tuple(range(1, p.ndim))))
+            prev_p = self.provider.previous_parameters[n]
+            delta = torch.count_nonzero(p - prev_p, dim=(tuple(range(1, p.ndim))))
             self.energy_l0 += delta.detach().cpu()
     
     def after_test(self, state):
@@ -999,17 +1311,21 @@ class EnergyL0NetworkHandler(Handler):
     
     events = {
             'before_train' : ['log'],
-            'before_step' : ['func'],
+            'after_step' : ['func'],
             'after_test' : ['log']
         }
+    
+    def __init__(self, previous_parameter_provider):
+        self.provider = previous_parameter_provider
 
     def before_train_log(self, state):
         self.energy_l0 = torch.zeros((state['n_networks'],), dtype=torch.long)
         state['data']['energies_l0'] = []
         
-        # before step, after loss = grads available
-    def before_step_func(self, n, p, state):
-        delta = torch.count_nonzero(p.grad, dim=(tuple(range(1, p.ndim))))
+
+    def after_step_func(self, n, p, state):
+        prev_p = self.provider.previous_parameters[n]
+        delta = torch.count_nonzero(p - prev_p, dim=(tuple(range(1, p.ndim))))
         self.energy_l0 += delta.detach().cpu()
     
     def after_test_log(self, state):

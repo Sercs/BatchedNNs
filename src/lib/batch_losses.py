@@ -2,6 +2,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
+
+
 # TODO: I think MSE should always average the outputs and reduction only applies to batch
 class MSELoss(nn.Module):
     def __init__(self, per_sample=False, reduction='mean'):
@@ -72,7 +74,7 @@ class MAELoss(nn.Module):
         return loss
 
 class HingeLoss(nn.Module):
-    def __init__(self, per_sample=False, reduction='sum', margin=1.0, device='cpu'):
+    def __init__(self, per_sample=False, reduction='sum', func=nn.ReLU(), margin=1.0):
         """
         Args:
             reduction (str): The reduction operation to apply: 'mean' or 'sum'.
@@ -87,18 +89,20 @@ class HingeLoss(nn.Module):
             raise ValueError(f"Invalid reduction type: {reduction}. Must be 'mean' or 'sum'.")
         self.reduction = reduction
         self.per_sample = per_sample
+        self.func = func
+        
         if isinstance(margin, torch.Tensor) and len(margin.shape) == 1:
-            margin = margin.unsqueeze(0).unsqueeze(-1).to(device)
+            margin = margin.unsqueeze(0).unsqueeze(-1)
         elif isinstance(margin, (np.ndarray, list)):
             #                             batch_dim    output_dim 
-            margin = torch.tensor(margin).unsqueeze(0).unsqueeze(-1).to(device)
+            margin = torch.tensor(margin).unsqueeze(0).unsqueeze(-1)
         self.margin = margin
-        self.device = device
 
     def forward(self, y_hat, y, idx=None):
+        self.margin = self.margin.to(y_hat.device)
         target_activities = torch.sum(y_hat * y, dim=-1, keepdim=True)
         margins = self.margin + y_hat - target_activities
-        loss_terms = F.relu(margins)
+        loss_terms = self.func(margins)
         unreduced_loss = loss_terms * (y < 1)
         if self.per_sample:
             dims_to_reduce = -1
@@ -162,12 +166,12 @@ class LazyLoss(nn.Module):
         return loss
     
 class StatefulLazyLoss(nn.Module):
-    def __init__(self, loss_fn, max_samples, n_networks, device, reduction='mean', per_sample=True, padding_value=-1):
+    def __init__(self, loss_fn, max_samples, n_networks, reduction='mean', per_sample=True, padding_value=-1):
         super().__init__()
         self.wrapped_loss_fn = loss_fn
         self.padding_value = padding_value
-        self.memory = torch.zeros((max_samples, n_networks), dtype=int).to(device)
-        self.model_idxs = torch.arange(0, n_networks, dtype=int).to(device)
+        self.memory = torch.zeros((max_samples, n_networks), dtype=torch.long)
+        self.model_idxs = torch.arange(0, n_networks, dtype=torch.long)
         
         self.per_sample = per_sample
         self.reduction = reduction
@@ -176,6 +180,9 @@ class StatefulLazyLoss(nn.Module):
             raise Exception("Lazy methods require the wrapped loss to return sample-wise losses")
         
     def forward(self, y_hat, y, idx=None):
+        
+        self.memory = self.memory.to(y_hat.device)
+        self.model_idxs = self.model_idxs.to(y_hat.device)
         
 
         incorrect = torch.where(

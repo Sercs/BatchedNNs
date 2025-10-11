@@ -74,7 +74,7 @@ class Trainer():
         self._fire_event('before_train')
         for epoch in range(n_epochs):
             print(f"Epoch: {epoch+1}")
-            
+            self.state['epoch'] = epoch+1
             self._fire_event('before_epoch')
             for (x, y, idx) in self.train_dataloader:
                 batch_size = x.size(0) # handles varying batch_size
@@ -106,8 +106,8 @@ class Trainer():
                     self._fire_event('after_test')  # typically for recording metrics
                     
                     # quick prints for stats
-                    # TODO: probably could make an interceptor print all the data we want
-                    print(self.state['data']['time_taken'][-1])
+                    # TODO: probably could make an interceptor print all the data we want [Done!]
+                    #print(self.state['data']['time_taken'][-1])
                     #print(self.state['data']['test_accuracies']['test'][-1])
                     # print(self.state['data']['energies_l1_layerwise'])
                     # print(self.state['data']['minimum_energies_l1_layerwise'])

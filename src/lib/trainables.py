@@ -41,10 +41,10 @@ class BatchLinearMasked(nn.Module):
         super().__init__()
         
         self.n_linears = n_linears
-        if type(n_ins) is not list:
-            n_ins = [n_ins]*n_linears
-        if type(n_outs) is not list:
-            n_outs = [n_outs]*n_linears
+        if isinstance(n_ins, int):
+            n_ins = [n_ins]*self.n_linears
+        if isinstance(n_outs, int):
+            n_outs = [n_outs]*self.n_linears
         n_in, n_out = max(n_ins), max(n_outs)
         self.n_in, self.n_out = n_in, n_out
         self.n_ins, self.n_outs = n_ins, n_outs
@@ -59,10 +59,14 @@ class BatchLinearMasked(nn.Module):
         self.n_recurs = n_recurs
         
         self.weights = nn.Parameter(torch.zeros((n_linears, n_out, n_in)))
-        self.biases = nn.Parameter(torch.zeros((n_linears, n_out)))
+        self.biases = nn.Parameter(torch.rand((n_linears, n_out)))
         
         self._init_weights(init_method, **init_config)
-        self._init_masks()     
+        self._init_masks()
+        
+        with torch.no_grad():
+            self.weights *= self.weight_mask
+            self.biases *= self.bias_mask
         
     def register_gradient_hooks(self):
         self.weights.register_hook(lambda grad: grad * self.weight_mask)
@@ -81,7 +85,6 @@ class BatchLinearMasked(nn.Module):
         self.register_buffer('bias_mask', b_mask)
     
     # since we zero out parts of the tensor we need special handling for fan_in/fan_out.
-    # TODO: update with list kwargs.
     def _init_weights(self, method, **kwargs):
         if method is None:
             method = 'kaiming_uniform'
@@ -116,13 +119,6 @@ class BatchLinearMasked(nn.Module):
                         current_kwargs[key] = value
                 n_active_in, n_active_out = self.n_ins[i], self.n_outs[i]
                 init_map[method](w[:n_active_out, :n_active_in], **current_kwargs)
-            
-        # method = method.lower()
-        # with torch.no_grad():
-        #     for i, w in enumerate(self.weights):
-        #         # mask incoming
-        #         n_active_in, n_active_out = self.n_ins[i], self.n_outs[i]
-        #         init_map[method](w[:n_active_out, :n_active_in], **kwargs)
                 
     def forward(self, x):
         if self.add_residual:
