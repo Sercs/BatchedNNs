@@ -80,11 +80,7 @@ class Handler:
 An optional test loop. It expects a name which indicates which test is being done
 (i.e. test loop, train loop, validation loop,etc) and dictionary of criterions with 
 {name of loss function : loss function} so that multiple criterions can be tested
-against. The loss function should be setup with per_sample=False (because we
-don't need to keep track of which items should be computed against and which 
-are padded) and reduce='sum' (because we want average metrics which requires
-averaging over batch size and dataset size, and (currently) we won't 
-know these ahead of time).
+against.
 """ 
 
 class TestLoop(Interceptor):
@@ -135,20 +131,17 @@ class TestLoop(Interceptor):
             if mask.sum() == 0:
                 continue
 
-            # --- Conditionally accumulate Loss ---
             if self.criterions:
                 for name, crit in self.criterions.items():
                     masked_per_sample_loss = crit(y_hat, y, idx, padding_value)
                     total_loss_sums[name] += masked_per_sample_loss.sum(0)
 
-            # --- Conditionally accumulate Accuracy ---
             if self.track_accuracy:
                 correct_tensor = (y_hat.argmax(-1) == y.argmax(-1)).float()
                 total_correct_sum += (correct_tensor * mask).sum(dim=0)
             
             total_samples += mask.sum(0)
 
-        # --- Conditionally calculate and log final averages ---
         if self.criterions:
             for name, total_loss in total_loss_sums.items():
                 avg_loss = total_loss / (total_samples)
@@ -161,56 +154,6 @@ class TestLoop(Interceptor):
             state['data'].setdefault(f'{self.name}_accuracies', []).append(avg_accuracies.cpu().numpy())
 
         model.train()
-
-# class TestLoop(Interceptor):
-#     """
-#     An observer that performs a test/validation loop over a given dataset.
-    
-#     This observer listens for the 'on_test_run' event fired by the Trainer.
-#     """
-    
-#     def __init__(self, name, test_dataloader, criterions):
-#         self.name = name
-#         self.test_dataloader = test_dataloader
-#         self.criterions = {name: crit for name, crit in criterions.items()}
-#         self.trainer = None # this will be set by the Trainer
-
-#     def on_test_run(self, state):
-#         self.device = state['device']
-#         # set the current context so other observers know which dataset is being tested.
-#         state['current_test_context'] = self.name
-        
-#         state['model'].eval()
-#         with torch.no_grad():
-#             for (x, y, idx) in self.test_dataloader:
-#                 batch_size = x.size(0)
-#                 x, y, idx = x.to(self.device), y.to(self.device), idx.to(self.device)
-#                 if len(x.shape) < 3:
-#                     x = x.unsqueeze(1)
-#                     y = y.unsqueeze(1).repeat((1, state['n_networks'], 1))
-#                     idx = idx.unsqueeze(1).repeat(1, state['n_networks'])
-
-#                 if self.trainer:
-#                     self.trainer._fire_event('before_test_forward')
-                
-#                 y_hat = state['model'](x)
-
-
-#                 batch_losses = {name: crit(y_hat, y, idx, state['padding_value'])
-#                                     for name, crit in self.criterions.items()
-#                                 }
-#                 batch_accuracy = (y_hat.argmax(-1) == y.argmax(-1)).sum(0)
-                
-#                 # use the unique name to store results in the state
-                
-#                 state[f'{self.name}_losses'] = batch_losses
-#                 state[f'{self.name}_accuracies'] = batch_accuracy
-
-#                 # fire event after forward pass
-#                 if self.trainer:
-#                     self.trainer._fire_event('after_test_forward')
-
-#         state['model'].train()
         
 ############################# METRICS ################################
 """
@@ -781,242 +724,6 @@ class InitialParameterProvider(Interceptor):
     def get_parameters(self):
         return self.initial_parameters
     
-class EnergyMetricTracker(Interceptor):
-    def __init__(self, p, param_provider, mode, granularity='network', components=['total'], neuron_dim='incoming'):
-        if not isinstance(p, (int, float)) or p < 0:
-            raise ValueError(f"p must be a non-negative number, but got {p}.")
-        if mode not in ['energy', 'minimum_energy']:
-            raise ValueError(f"Invalid mode: {mode}. Must be 'energy' (cumulative) or 'minimum_energy' (norm from initial).")
-        if granularity not in ['network', 'layer', 'neuron']:
-            raise ValueError(f"Invalid granularity: {granularity}. Must be 'network', 'layer', or 'neuron'.")
-            
-        self.p = p
-        self.provider = param_provider
-        self.mode = mode
-        self.granularity = granularity
-        self.components = [components] if isinstance(components, str) else list(components) # Ensure it's a mutable list
-        self.neuron_dim = [neuron_dim] if isinstance(neuron_dim, str) else neuron_dim
-        
-        if not all(c in ['total', 'weight', 'bias'] for c in self.components):
-            raise ValueError("components must be a list with options from: 'total', 'weight', 'bias'")
-
-        # --- Handle 'total' ambiguity for neuronwise granularity ---
-        if self.granularity == 'neuron' and 'total' in self.components:
-            print(f"INFO (Tracker p={self.p}, {self.mode}): For 'neuron' granularity, 'total' is ambiguous. Defaulting to tracking 'weight' and 'bias' components separately.")
-            # Add weight and bias if they aren't there, then remove total.
-            if 'weight' not in self.components:
-                self.components.append('weight')
-            if 'bias' not in self.components:
-                self.components.append('bias')
-            self.components.remove('total')
-            # Remove duplicates if user provided something like ['total', 'weight']
-            self.components = sorted(list(set(self.components)))
-            
-        self.metric = {}
-        self.log_key = self._generate_log_key()
-        
-    def _generate_log_key(self):
-        mode_prefix = 'minimum_energies' if self.mode == 'minimum_energy' else 'energies'
-        return f"{mode_prefix}_l{self.p}_{self.granularity}"
-    
-    def _get_layer_names(self, model):
-        """Helper to get unique layer prefixes from parameter names."""
-        return sorted(list(set([n.split('.')[0] for n, _ in model.named_parameters()])))
-    
-    @torch.no_grad()
-    def before_train(self, state):
-        """Initializes storage for metrics and logs with component substructure."""
-        state['data'][self.log_key] = {comp: {} for comp in self.components}
-
-        if self.granularity == 'layer':
-            for comp in self.components:
-                if comp == 'total':
-                    param_keys = self._get_layer_names(state['model'])
-                    state['data'][self.log_key][comp] = {n: [] for n in param_keys}
-                else:
-                    param_keys = [n for n, _ in state['model'].named_parameters() if self._is_component(n, comp)]
-                    state['data'][self.log_key][comp] = {n: [] for n in param_keys}
-        elif self.granularity == 'neuron':
-            for comp in self.components:
-                param_dict = {}
-                for n, p in state['model'].named_parameters():
-                    if self._is_component(n, comp):
-                        if self._is_component(n, 'bias'):
-                            param_dict[n] = [] # Biases don't have energy direction
-                        else:
-                            param_dict[n] = {n_dim: [] for n_dim in self.neuron_dim}
-                state['data'][self.log_key][comp] = param_dict
-        else: # network
-             for comp in self.components:
-                state['data'][self.log_key][comp] = []
-                
-        if self.mode == 'energy':
-            self._initialize_metric_accumulator(state)
-            
-    def _initialize_metric_accumulator(self, state):
-        """Sets up `self.metric` as a dictionary of component accumulators on the correct device."""
-        device = state['device']
-        self.metric = {comp: {} for comp in self.components}
-        for comp in self.components:
-            dtype = torch.long if self.p == 0 else torch.float
-            if self.granularity == 'network':
-                self.metric[comp] = torch.zeros(state['n_networks'], dtype=dtype, device=device)
-            elif self.granularity == 'layer':
-                self.metric[comp] = {}
-                if comp == 'total':
-                    for name in self._get_layer_names(state['model']):
-                        self.metric[comp][name] = torch.zeros(state['n_networks'], dtype=dtype, device=device)
-                else:
-                    for n, _ in state['model'].named_parameters():
-                        if self._is_component(n, comp):
-                            self.metric[comp][n] = torch.zeros(state['n_networks'], dtype=dtype, device=device)
-            elif self.granularity == 'neuron':
-                self.metric[comp] = {}
-                for n, p in state['model'].named_parameters():
-                    if self._is_component(n, comp):
-                        if self._is_component(n, 'bias'):
-                            self.metric[comp][n] = torch.zeros(p.shape, dtype=dtype, device=device)
-                        else: # Weight
-                            self.metric[comp][n] = {}
-                            for n_dim in self.neuron_dim:
-                                shape = None
-                                if p.ndim >= 3:
-                                    if n_dim == 'incoming': shape = p.shape[:2] # (batch, out_neurons)
-                                    elif n_dim == 'outgoing': shape = (p.shape[0],) + p.shape[2:] # (batch, in_neurons, ...)
-                                if shape is not None:
-                                    self.metric[comp][n][n_dim] = torch.zeros(shape, dtype=dtype, device=device)
-    @torch.no_grad()
-    def after_step(self, state):
-        """For cumulative mode, calculate step-wise delta and accumulate."""
-        if self.mode != 'energy':
-            return # skip minimum
-        
-        ref_params = self.provider.get_parameters()
-        deltas = self._calculate_deltas(state['model'], ref_params)
-        self._accumulate_deltas(deltas)
-        
-    def after_test(self, state):
-        if self.mode == 'energy':
-            metric_to_log = self.metric
-        else:
-            ref_params = self.provider.get_parameters()
-            metric_to_log = self._calculate_deltas(state['model'], ref_params)
-            
-        self._log_metric(state, metric_to_log)
-        
-    @torch.no_grad()
-    def _calculate_deltas(self, model, ref_params):
-        """Core method to compute deltas for weights and biases separately."""
-        # 'neuron' requires a different calculation.
-        if self.granularity == 'neuron':
-            results = {comp: {} for comp in self.components}
-            for n, p in model.named_parameters():
-                delta = p - ref_params[n].to(p.device)
-                
-                is_bias = self._is_component(n, 'bias')
-                
-                # Process biases
-                if is_bias and 'bias' in self.components:
-                    energy = (delta.abs()**self.p)**(1/self.p) if self.p != 0 else (delta != 0).float()
-                    results['bias'][n] = energy
-
-                # Process weights
-                elif not is_bias and 'weight' in self.components and p.ndim >= 3:
-                    neuron_metrics = {}
-                    for n_dim in self.neuron_dim:
-                        sum_dims = tuple(range(2, p.ndim)) if n_dim == 'incoming' else 1
-                        sum_of_pows = (delta.abs()**self.p).sum(dim=sum_dims)
-                        energy = sum_of_pows**(1/self.p) if self.p != 0 else torch.count_nonzero(delta, dim=sum_dims).float()
-                        neuron_metrics[n_dim] = energy
-                    results['weight'][n] = neuron_metrics
-            return results
-
-        # layer and network logic
-        raw_deltas = {'weight': {}, 'bias': {}}
-        for n, p in model.named_parameters():
-            comp_type = 'bias' if ('bias' in n) else 'weight'
-            ref_p = ref_params[n].to(p.device)
-            delta = p - ref_p
-            sum_dims = tuple(range(1, p.ndim))
-            if self.p == 0:
-                raw_deltas[comp_type][n] = torch.count_nonzero(delta, dim=sum_dims)
-            else:
-                raw_deltas[comp_type][n] = (delta.abs()**self.p).sum(dim=sum_dims)
-        
-        results = {}
-        for comp in self.components:
-            if self.granularity == 'network':
-                all_param_deltas = list(raw_deltas['weight'].values()) + list(raw_deltas['bias'].values()) if comp == 'total' else list(raw_deltas[comp].values())
-                sum_of_pows = torch.stack(all_param_deltas).sum(dim=0) if all_param_deltas else torch.tensor(0.0, device=p.device)
-                results[comp] = sum_of_pows**(1 / self.p) if self.p != 0 else sum_of_pows
-            
-            elif self.granularity == 'layer':
-                results[comp] = {}
-                if comp == 'total':
-                    layer_groups = {}
-                    all_raw = {**raw_deltas['weight'], **raw_deltas['bias']}
-                    for n, raw_delta in all_raw.items():
-                        layer_name = n.split('.')[0]
-                        if layer_name not in layer_groups: layer_groups[layer_name] = []
-                        layer_groups[layer_name].append(raw_delta)
-                    for name, raw_list in layer_groups.items():
-                        total_raw = torch.stack(raw_list).sum(dim=0)
-                        results[comp][name] = total_raw**(1/self.p) if self.p != 0 else total_raw
-                else:
-                    for n, raw_d in raw_deltas[comp].items():
-                        results[comp][n] = raw_d**(1/self.p) if self.p != 0 else raw_d
-        return results
-    
-    @torch.no_grad()
-    def _accumulate_deltas(self, deltas):
-        """Accumulates deltas for each component."""
-        for comp, delta_val in deltas.items():
-            if self.granularity == 'network':
-                self.metric[comp] += delta_val
-            elif self.granularity == 'layer':
-                for name, val in delta_val.items():
-                    if name in self.metric[comp]: self.metric[comp][name] += val
-            elif self.granularity == 'neuron':
-                for n, val in delta_val.items():
-                    if n in self.metric[comp]:
-                        if isinstance(val, dict): # Weight
-                            for n_dim, e_val in val.items():
-                                if n_dim in self.metric[comp][n]:
-                                    self.metric[comp][n][n_dim] += e_val
-                        else: # Bias
-                            self.metric[comp][n] += val
-
-    @torch.no_grad()
-    def _log_metric(self, state, metric_to_log):
-        """Appends metrics for each component to the state['data'] dictionary."""
-        for comp, metric in metric_to_log.items():
-            if self.granularity == 'network':
-                state['data'][self.log_key][comp].append(metric.clone().cpu().numpy())
-            elif self.granularity == 'layer':
-                for n, val in metric.items():
-                    if n in state['data'][self.log_key][comp]:
-                        state['data'][self.log_key][comp][n].append(val.clone().cpu().numpy())
-            elif self.granularity == 'neuron':
-                for n, val in metric.items():
-                    if n in state['data'][self.log_key][comp]:
-                        if isinstance(val, dict): # Weight
-                            for n_dim, e_val in val.items():
-                                 if n_dim in state['data'][self.log_key][comp][n]:
-                                    state['data'][self.log_key][comp][n][n_dim].append(e_val.clone().cpu().numpy())
-                        else: # Bias
-                            state['data'][self.log_key][comp][n].append(val.clone().cpu().numpy())
-    
-    def _is_component(self, name, component_type):
-        """Helper to check if a parameter name matches the component type."""
-        is_bias = 'bias' in name
-        if component_type == 'total':
-            return True
-        elif component_type == 'weight':
-            return not is_bias
-        elif component_type == 'bias':
-            return is_bias
-        return False
-
 ############################# ENERGY FUNCS ################################
 """
 This Interceptor generalizes the compute energy calculations (Li & van Rossum 2020) and 
@@ -1024,7 +731,7 @@ usually requires a provider. They have been split into network, layerwise and ne
 to get different granularities of energy metrics.
 """    
 
-class EnergyMetircTracker(Interceptor):
+class EnergyMetricTracker(Interceptor):
     """
     A generalized interceptor to track the delta ("energy") of network parameters.
 
@@ -1280,7 +987,56 @@ Interceptors here have been superseded by other Interceptor above. For instance,
 TestLoop now implements the testing accuracy and loss trackers internally since
 it keeps track of valid samples and can appropriately normalise values.
 """      
+           
+class _TestLoopOld(Interceptor):
+    """
+    An observer that performs a test/validation loop over a given dataset.
+    
+    This observer listens for the 'on_test_run' event fired by the Trainer.
+    """
+    
+    def __init__(self, name, test_dataloader, criterions):
+        self.name = name
+        self.test_dataloader = test_dataloader
+        self.criterions = {name: crit for name, crit in criterions.items()}
+        self.trainer = None # this will be set by the Trainer
+
+    def on_test_run(self, state):
+        self.device = state['device']
+        # set the current context so other observers know which dataset is being tested.
+        state['current_test_context'] = self.name
+        
+        state['model'].eval()
+        with torch.no_grad():
+            for (x, y, idx) in self.test_dataloader:
+                batch_size = x.size(0)
+                x, y, idx = x.to(self.device), y.to(self.device), idx.to(self.device)
+                if len(x.shape) < 3:
+                    x = x.unsqueeze(1)
+                    y = y.unsqueeze(1).repeat((1, state['n_networks'], 1))
+                    idx = idx.unsqueeze(1).repeat(1, state['n_networks'])
+
+                if self.trainer:
+                    self.trainer._fire_event('before_test_forward')
                 
+                y_hat = state['model'](x)
+
+
+                batch_losses = {name: crit(y_hat, y, idx, state['padding_value'])
+                                    for name, crit in self.criterions.items()
+                                }
+                batch_accuracy = (y_hat.argmax(-1) == y.argmax(-1)).sum(0)
+                
+                # use the unique name to store results in the state
+                
+                state[f'{self.name}_losses'] = batch_losses
+                state[f'{self.name}_accuracies'] = batch_accuracy
+
+                # fire event after forward pass
+                if self.trainer:
+                    self.trainer._fire_event('after_test_forward')
+
+        state['model'].train()     
                 
 class RunningLossTracker(Interceptor):
     def __init__(self):
