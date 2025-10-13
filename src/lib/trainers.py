@@ -14,6 +14,7 @@ def _json_converter(o):
         return int(o)
     raise TypeError(f"Object of type {o.__class__.__name__} is not JSON serializable")
 
+# TODO: reduction on trainer
 class Trainer():
     def __init__(self, model, n_networks, optimizer, criterion, train_dataloader, test_dataloader, trackers=None, padding_value=-1, device='cpu'):
         self.model = model
@@ -23,7 +24,6 @@ class Trainer():
         self.train_dataloader = train_dataloader
         self.test_dataloader = test_dataloader
         self.padding_value = padding_value
-        
         if trackers is None:
             self.trackers = []
         else:
@@ -35,6 +35,7 @@ class Trainer():
                 'optimizer' : self.optimizer,
                 'criterion' : self.criterion,
                 'n_networks' : n_networks, # can't think of a better method for this
+                'step' : 1,
                 'device' : device,
                 'padding_value': padding_value,
                 'data' : {}
@@ -68,7 +69,10 @@ class Trainer():
 
         test_epoch = 0
         sample_counter = 0
-        
+        if sample_increment is None:
+            test_step = batch_size
+        else:
+            test_step = sample_increment
         
         # >>> Main loop <<<
         self._fire_event('before_train')
@@ -86,10 +90,6 @@ class Trainer():
                 # to handle varying batch_size over network dim
                 # we do so with a manual override that indicates the reference
                 # speed for testing (we could use min(batch) or mean(batch)).
-                if sample_increment is None:
-                    test_step = batch_size
-                else:
-                    test_step = sample_increment
                     
                 sample_counter += test_step
                 test_epoch += test_step
@@ -97,7 +97,7 @@ class Trainer():
                 step_loss, step_accuracy = self.train_step(x, y, idx)
                 self.state['running_loss'] = step_loss.detach().cpu() # multiply by batch size since we average
                 self.state['running_accuracy'] = step_accuracy.detach().cpu()
-                self._fire_event('after_update') 
+                self._fire_event('after_update')
                 if test_epoch >= test_interval: # TODO: it may be possible to avoid this check and instead 
                                                 #       have interceptors that need it look for a state['count']
                     print("Forward passes since last test:", test_epoch)            
@@ -122,6 +122,7 @@ class Trainer():
                 if stop_on_sample > 0 and sample_counter > stop_on_sample:
                     self._fire_event('after_train') # mid epoch stop
                     return
+                self.state['step'] += 1
             self._fire_event('after_epoch') # record stuff
         self._fire_event('after_train') # record stuff
 
@@ -140,17 +141,15 @@ class Trainer():
         # if we get loss here, we can modify it with observers
         self.optimizer.zero_grad()
         
-        per_sample_supervised_loss = self.criterion(y_hat, y, idx)
+        per_sample_supervised_loss = self.criterion(y_hat, y, idx, self.state['padding_value'])
         self.state['per_sample_losses'] = per_sample_supervised_loss # useful for computing which samples were used
-        
         # this code essentially averages per batch accounting for buffered items
         mask = (idx != self.padding_value) # get padded items
-        masked_losses = per_sample_supervised_loss * mask # mask them
+        #masked_losses = per_sample_supervised_loss * mask # mask them
         n_valid_samples = mask.sum(0) # get the total items 
-        supervised_loss = masked_losses.sum(0) / (n_valid_samples + 1e-12) # average 
+        supervised_loss = per_sample_supervised_loss.sum(0) / (n_valid_samples + 1e-12) # average 
                             #                                         |
                             # (eps avoids zero division error and in this case all losses will be zero anyway)
-        
         self.state['loss'] = supervised_loss # main loss
         
         correct = ((y_hat.argmax(-1) == y.argmax(-1)) * (idx != self.padding_value)).sum(0) # correct items for classification tasks
@@ -170,6 +169,13 @@ class Trainer():
         self._fire_event('after_step') # get step info (i.e. energy calculations)
         
         return loss, correct
+    
+    # I wasn't aware of circular dependencies and now I am
+    def cleanup(self):
+        print("Breaking circular references...")
+        for tracker in self.trackers:
+            tracker.trainer = None
+        self.trackers = []
     
     # file loading and data saving is largely Gemini-Pro 2.5
     def save_checkpoint(self, path):

@@ -87,57 +87,130 @@ averaging over batch size and dataset size, and (currently) we won't
 know these ahead of time).
 """ 
 
-# TODO: try to get better averages.
-
 class TestLoop(Interceptor):
     """
-    An observer that performs a test/validation loop over a given dataset.
-    
-    This observer listens for the 'on_test_run' event fired by the Trainer.
+    Performs a full evaluation loop, with optional loss and accuracy tracking.
+    This class handles its own accumulation and masking for correctness.
     """
-    
-    def __init__(self, name, test_dataloader, criterions):
+    def __init__(self, name, dataloader, criterions=None, track_accuracy=True):
+        """
+        Args:
+            name (str): A unique name for this test context (e.g., 'validation').
+            test_dataloader: The DataLoader for the evaluation set.
+            criterions (dict, optional): A dictionary of loss functions. If None,
+                                         loss is not calculated. Defaults to None.
+            track_accuracy (bool, optional): If True, accuracy is calculated.
+                                             Defaults to True.
+        """
+        super().__init__()
         self.name = name
-        self.test_dataloader = test_dataloader
-        self.criterions = {name: crit for name, crit in criterions.items()}
-        self.trainer = None # this will be set by the Trainer
+        self.dataloader = dataloader
+        self.criterions = criterions or {} # Handle None case
+        self.track_accuracy = track_accuracy
 
+    @torch.no_grad()
     def on_test_run(self, state):
-        self.device = state['device']
-        # set the current context so other observers know which dataset is being tested.
-        state['current_test_context'] = self.name
+        model = state['model']
+        device = state['device']
+        padding_value = state['padding_value']
+
+        model.eval()
+
+        # --- Initialize accumulators based on configuration ---
+        total_loss_sums = {name: 0.0 for name in self.criterions} if self.criterions else {}
+        total_correct_sum = torch.zeros(state['n_networks'], device=device) if self.track_accuracy else None
+        total_samples = torch.zeros(state['n_networks'], device=device)
+
+        for (x, y, idx) in self.dataloader:
+            x, y, idx = x.to(device), y.to(device), idx.to(device)
+            if len(x.shape) < 3:
+                x = x.unsqueeze(1)
+                y = y.unsqueeze(1).repeat((1, state['n_networks'], 1))
+                idx = idx.unsqueeze(1).repeat(1, state['n_networks'])
+                
+            mask = (idx != padding_value).float()
+
+            y_hat = model(x)
+            
+            if mask.sum() == 0:
+                continue
+
+            # --- Conditionally accumulate Loss ---
+            if self.criterions:
+                for name, crit in self.criterions.items():
+                    masked_per_sample_loss = crit(y_hat, y, idx, padding_value)
+                    total_loss_sums[name] += masked_per_sample_loss.sum(0)
+
+            # --- Conditionally accumulate Accuracy ---
+            if self.track_accuracy:
+                correct_tensor = (y_hat.argmax(-1) == y.argmax(-1)).float()
+                total_correct_sum += (correct_tensor * mask).sum(dim=0)
+            
+            total_samples += mask.sum(0)
+
+        # --- Conditionally calculate and log final averages ---
+        if self.criterions:
+            for name, total_loss in total_loss_sums.items():
+                avg_loss = total_loss / (total_samples)
+                avg_loss[total_samples == 0] = 0.0
+                state['data'].setdefault(f'{self.name}_losses', {}).setdefault(name, []).append(avg_loss.cpu().numpy())
+
+        if self.track_accuracy:
+            avg_accuracies = (total_correct_sum / total_samples) * 100
+            avg_accuracies[total_samples == 0] = 0.0
+            state['data'].setdefault(f'{self.name}_accuracies', []).append(avg_accuracies.cpu().numpy())
+
+        model.train()
+
+# class TestLoop(Interceptor):
+#     """
+#     An observer that performs a test/validation loop over a given dataset.
+    
+#     This observer listens for the 'on_test_run' event fired by the Trainer.
+#     """
+    
+#     def __init__(self, name, test_dataloader, criterions):
+#         self.name = name
+#         self.test_dataloader = test_dataloader
+#         self.criterions = {name: crit for name, crit in criterions.items()}
+#         self.trainer = None # this will be set by the Trainer
+
+#     def on_test_run(self, state):
+#         self.device = state['device']
+#         # set the current context so other observers know which dataset is being tested.
+#         state['current_test_context'] = self.name
         
-        state['model'].eval()
-        with torch.no_grad():
-            for (x, y, idx) in self.test_dataloader:
-                batch_size = x.size(0)
-                x, y, idx = x.to(self.device), y.to(self.device), idx.to(self.device)
-                if len(x.shape) < 3:
-                    x = x.unsqueeze(1)
-                    y = y.unsqueeze(1).repeat((1, state['n_networks'], 1))
-                    idx = idx.unsqueeze(1).repeat(1, state['n_networks'])
+#         state['model'].eval()
+#         with torch.no_grad():
+#             for (x, y, idx) in self.test_dataloader:
+#                 batch_size = x.size(0)
+#                 x, y, idx = x.to(self.device), y.to(self.device), idx.to(self.device)
+#                 if len(x.shape) < 3:
+#                     x = x.unsqueeze(1)
+#                     y = y.unsqueeze(1).repeat((1, state['n_networks'], 1))
+#                     idx = idx.unsqueeze(1).repeat(1, state['n_networks'])
 
-                if self.trainer:
-                    self.trainer._fire_event('before_test_forward')
+#                 if self.trainer:
+#                     self.trainer._fire_event('before_test_forward')
                 
-                y_hat = state['model'](x)
+#                 y_hat = state['model'](x)
 
 
-                batch_losses = {name: crit(y_hat, y, idx)
-                                    for name, crit in self.criterions.items()
-                                }
-                batch_accuracy = (y_hat.argmax(-1) == y.argmax(-1)).sum(0)
+#                 batch_losses = {name: crit(y_hat, y, idx, state['padding_value'])
+#                                     for name, crit in self.criterions.items()
+#                                 }
+#                 batch_accuracy = (y_hat.argmax(-1) == y.argmax(-1)).sum(0)
                 
-                # use the unique name to store results in the state
+#                 # use the unique name to store results in the state
                 
-                state[f'{self.name}_losses'] = batch_losses
-                state[f'{self.name}_accuracies'] = batch_accuracy
+#                 state[f'{self.name}_losses'] = batch_losses
+#                 state[f'{self.name}_accuracies'] = batch_accuracy
 
-                # fire event after forward pass
-                if self.trainer:
-                    self.trainer._fire_event('after_test_forward')
+#                 # fire event after forward pass
+#                 if self.trainer:
+#                     self.trainer._fire_event('after_test_forward')
 
-        state['model'].train()
+#         state['model'].train()
         
 ############################# METRICS ################################
 """
@@ -146,131 +219,97 @@ These Interceptors deal with metrics like wall clock speed, losses and accuracie
 # gemini-flash with hand-holding
 class ResultPrinter(Interceptor):
     """
-    Interceptor that prints specified metrics after every test run.
-    Uses a single recursive method to handle arbitrary nested dictionary configurations
-    with a minimal, indented output style.
+    Interceptor that prints specified metrics after every test run, with the
+    ability to apply functions like np.mean to array-like results.
     """
     def __init__(self, metrics):
         super().__init__()
-        self.metrics_config = metrics
+        # Separate the metric config from the function config
+        self.metrics_config = {k: v for k, v in metrics.items() if k != 'func'}
+        self.funcs = metrics.get('func', {})
 
     def _format_result(self, latest_result):
-        """Helper to format a single scalar or tensor value into a string."""
-        if isinstance(latest_result, (float, int, np.float64)):
-            # Scalar result
+        """Helper to format a scalar or apply functions to an array."""
+        if isinstance(latest_result, (float, int, np.number)):
             return f"{latest_result:.5f}"
         
         elif isinstance(latest_result, (np.ndarray, torch.Tensor)):
-            # Array/Tensor result (prints all values)
             if isinstance(latest_result, torch.Tensor):
                 latest_result = latest_result.cpu().numpy()
             
-            formatted_values = [f"{v:.5f}" for v in latest_result.flatten()]
-            return f"[{', '.join(formatted_values)}]"
-        
+            # If functions are provided, apply them
+            if self.funcs:
+                results = []
+                for func_name, func in self.funcs.items():
+                    try:
+                        value = func(latest_result)
+                        results.append(f"{func_name.title()}: {value:.5f}")
+                    except Exception:
+                        results.append(f"{func_name.title()}: N/A")
+                return ", ".join(results)
+            # Otherwise, print the full array (for short arrays)
+            else:
+                values = [f"{v:.5f}" for v in latest_result.flatten()]
+                return f"[{', '.join(values)}]"
+                
         return str(latest_result)
 
-    def _recursive_print_metric(self, current_data, current_config, indent):
-        """
-        Recursively prints nested metric data based on the structure of current_config.
-        Handles filtering and printing at arbitrary depth using '-' indentation and stacked values.
-        """
-        
-        # 1. Determine targets for this level based on current_config
-        targets = []
-        if current_config is True:
-            targets = list(current_data.keys())
-        elif isinstance(current_config, list):
-            targets = current_config
-        elif isinstance(current_config, dict):
-            targets = list(current_config.keys())
-        else:
-            # Config structure is not dict, list, or True (e.g., reached a value that wasn't a list)
-            return 
-        
-        # 2. Iterate through targets
-        for key in targets:
-            if key not in current_data:
-                continue
-            
-            sub_data = current_data[key]
-            
-            # Determine the sub-filter configuration (the value in the current config dict, or True if not specified)
-            sub_config = current_config.get(key) if isinstance(current_config, dict) else True
-            
-            # Determine the indentation prefix for the label: '-', '--', '---', etc.
-            indent_prefix = '-' * (indent + 1)
-            
-            # --- Base Case Check (Data is a list of historical results) ---
-            if isinstance(sub_data, list):
-                if sub_data:
-                    latest_result = sub_data[-1]
-                    formatted_value = self._format_result(latest_result)
-                    
-                    # Print label: -- Condition 1:
-                    print(f"{indent_prefix} {key.replace('_', ' ').title()}:")
-                    
-                    # Print value on the next line, indented one level deeper (space aligned with prefix)
-                    print(f"{formatted_value}")
-                
-            # --- Recursive Case Check (Data is a dictionary, continue nesting) ---
-            elif isinstance(sub_data, dict):
-                
-                # Print the nesting key header: e.g., - Test Context:
-                print(f"{indent_prefix} {key.replace('_', ' ').title()}:")
-                
-                # Recursive call
-                self._recursive_print_metric(
-                    current_data=sub_data, 
-                    current_config=sub_config, 
-                    indent=indent + 1
-                )
+    def _print_formatted(self, title, value_str, indent_level=0):
+        """Prints title and value with smart formatting."""
+        prefix = '  ' * indent_level
+        # If the value is complex (multi-part or a full array), print on a new line
+        if ',' in value_str or '[' in value_str:
+            print(f"{prefix}{title}:")
+            print(f"{prefix}  -> {value_str}")
+        else: # Simple scalar
+            print(f"{prefix}{title}: {value_str}")
 
+    def _recursive_print(self, data, config, indent_level):
+        """Recursively traverses and prints nested metric data."""
+        targets = []
+        if config is True: targets = list(data.keys())
+        elif isinstance(config, list): targets = config
+        elif isinstance(config, dict): targets = list(config.keys())
+        
+        for key in targets:
+            if key not in data: continue
+            
+            sub_data = data[key]
+            sub_config = config.get(key) if isinstance(config, dict) else True
+            
+            title = key.replace('_', ' ').title()
+            
+            # Base Case: We've hit a list of results
+            if isinstance(sub_data, list) and sub_data:
+                formatted_value = self._format_result(sub_data[-1])
+                self._print_formatted(title, formatted_value, indent_level)
+            # Recursive Step: Continue deeper
+            elif isinstance(sub_data, dict):
+                print(f"{'  ' * indent_level}{title}:")
+                self._recursive_print(sub_data, sub_config, indent_level + 1)
 
     def after_test(self, state):
         """Prints the most recent value for each configured metric."""
+        if not self.metrics_config: return
         
-        if not self.metrics_config:
-            return
-
-        print(f"\nEPOCH {state['epoch']} | RESULTS")
+        print("-" * 50)
+        print(f"EPOCH {state.get('epoch', 0)} | RESULTS")
+        print("-" * 50)
         
         for metric_name, config in self.metrics_config.items():
             if metric_name not in state['data']:
-                print(f"⚠️ WARNING: Metric '{metric_name}' not found.")
+                print(f"⚠️  Metric '{metric_name}' not found.")
                 continue
             
-            latest_result_history = state['data'][metric_name]
+            self._recursive_print(state['data'], {metric_name: config}, 0)
 
-            # Case 1: Simple list-based metrics (e.g., time_taken, running_losses)
-            if isinstance(latest_result_history, list):
-                if config is True and latest_result_history:
-                    latest_result = latest_result_history[-1]
-                    if isinstance(latest_result, (int, float)):
-                        check = True
-                    else:
-                        check = False
-                    formatted_value = self._format_result(latest_result)
-                    
-                    # Print in the new stacked format (no extra line break needed here)
-                    if check:
-                        print(f"{metric_name.replace('_', ' ').title()}: {formatted_value}")
-                    else:
-                        print(f"{metric_name.replace('_', ' ').title()}:") # Print label
-                        print(f"{formatted_value}") # Print value on next line, unindented
-        
-            # Case 2: Nested dictionary metrics
-            elif isinstance(latest_result_history, dict):
-                # Print the root metric name header (e.g., Test Losses:)
-                print(f"{metric_name.replace('_', ' ').title()}:")
-                
-                # Initiate recursion (indent=0 starts with one '-')
-                self._recursive_print_metric(
-                    current_data=latest_result_history, 
-                    current_config=config, 
-                    indent=0
-                )
-    
+############################# COUNTERS ################################
+"""
+These Interceptors primarily deal with counting items: forward passes,
+the number of items in a forward pass (i.e. batching), the number of 
+items actually used for learning, etc.
+"""
+
 class Timer(Interceptor):
     def __init__(self):
         super().__init__()
@@ -288,6 +327,961 @@ class Timer(Interceptor):
         
         self.last_test_time = current_time
 
+class EpochCounter(Interceptor):
+    def __init__(self, dataset_sizes):
+        super().__init__()
+        if isinstance(dataset_sizes, (list, np.ndarray, int)):
+            dataset_sizes = torch.tensor(dataset_sizes)
+        self.dataset_sizes = dataset_sizes
+   
+    def before_train(self, state):
+        self.dataset_sizes = self.dataset_sizes.to(state['device'])
+        self.samples_seen = torch.zeros((state['n_networks'],), device=state['device'])
+        self.epochs = torch.zeros((state['n_networks'],), device=state['device'])
+        state['data']['epochs'] = []
+        
+    def after_update(self, state):
+        sample_count = (state['idx'] != state['padding_value']).sum(0)
+        self.samples_seen += sample_count
+        self.epochs = self.samples_seen / self.dataset_sizes
+    
+    def after_test(self, state):
+        state['data']['epochs'].append(self.epochs.clone().detach().cpu().numpy())
+
+class ForwardPassCounter(Interceptor):
+    def __init__(self):
+        super().__init__()
+
+    def before_train(self, state):
+        n_networks = state['n_networks']
+        self.forward_pass_counts = torch.zeros(n_networks, dtype=torch.long)
+        state['data']['forward_pass_counts'] = []
+
+    def after_step(self, state):
+        idx = state.get('idx')
+        padding_value = state.get('padding_value', -1)
+
+        if idx is None:
+            return
+
+        is_valid = (idx != padding_value)
+        passes_this_batch = is_valid.any(dim=0).long()
+        
+        self.forward_pass_counts += passes_this_batch.cpu()
+
+    def after_test(self, state):
+        state['data']['forward_pass_counts'].append(self.forward_pass_counts.clone().numpy())
+
+class ForwardItemCounter(Interceptor):
+    def __init__(self):
+        super().__init__()
+
+    def before_train(self, state):
+        n_networks = state['n_networks']
+        self.forward_item_counts = torch.zeros(n_networks, dtype=torch.long)
+        state['data']['forward_item_counts'] = []
+
+    def after_step(self, state):
+        idx = state.get('idx')
+        padding_value = state.get('padding_value', -1)
+
+        if idx is None:
+            return
+
+        is_valid = (idx != padding_value)
+        items_this_batch = is_valid.sum(dim=0).long()
+
+        self.forward_item_counts += items_this_batch.cpu()
+
+    def after_test(self, state):
+        """Logs the current counts to the data dictionary."""
+        state['data']['forward_item_counts'].append(self.forward_item_counts.clone().numpy())
+        
+class BackwardPassCounter(Interceptor):
+    def __init__(self):
+        super().__init__()
+
+    def before_train(self, state):
+        self.backward_pass_counts = torch.zeros(state['n_networks'], dtype=torch.long)
+        state['data']['backward_pass_counts'] = []
+
+    def after_step(self, state):
+        per_sample_loss = state.get('per_sample_losses')
+        if per_sample_loss is None: return
+        
+        was_updated_mask = (per_sample_loss > 1e-9) # eps for rounding errors
+        
+        updates_this_batch = was_updated_mask.any(dim=0).long()
+        self.backward_pass_counts += updates_this_batch.cpu()
+
+    def after_test(self, state):
+        state['data']['backward_pass_counts'].append(self.backward_pass_counts.clone().numpy())
+
+class BackwardItemCounter(Interceptor):
+    def __init__(self):
+        super().__init__()
+
+    def before_train(self, state):
+        self.backward_item_counts = torch.zeros(state['n_networks'], dtype=torch.long)
+        state['data']['backward_item_counts'] = []
+
+    def after_step(self, state):
+        per_sample_loss = state.get('per_sample_losses')
+        if per_sample_loss is None: return
+
+        was_updated_mask = (per_sample_loss > 1e-9) # eps for rounding errors
+
+        updated_items_this_batch = was_updated_mask.sum(dim=0).long()
+        self.backward_item_counts += updated_items_this_batch.cpu()
+
+    def after_test(self, state):
+        state['data']['backward_item_counts'].append(self.backward_item_counts.clone().numpy())
+        
+class PerSampleBackwardCounter(Interceptor):
+    def __init__(self, max_samples):
+        super().__init__()
+        if not isinstance(max_samples, int) or max_samples <= 0:
+            raise ValueError("max_samples must be a positive integer.")
+        self.max_samples = max_samples
+
+    def before_train(self, state):
+        n_networks = state['n_networks']
+        self.per_sample_backward_counts = torch.zeros((self.max_samples, n_networks), dtype=torch.long)
+        state['data']['per_sample_backward_counts'] = self.per_sample_backward_counts
+
+    def after_update(self, state):
+        per_sample_loss = state.get('per_sample_losses').cpu()
+        idx = state.get('idx').cpu()
+
+        if per_sample_loss is None or idx is None:
+            return
+
+        # get indices of valid samples that contributed to the loss
+        update_coords = torch.where(
+            (per_sample_loss > 1e-9) & (idx != state.get('padding_value', -1)) # eps for rounding errors
+        )
+        
+        if update_coords[0].numel() == 0:
+            return 
+
+                            #    Gemini-Pro 2.5 tip
+                            #             |
+                            #             V
+        self.per_sample_backward_counts.index_put_(
+            (idx[update_coords], update_coords[1]),
+            torch.tensor(1, device='cpu'),
+            accumulate=True
+        )
+
+    def after_train(self, state):
+        state['data']['per_sample_backward_counts'] = self.per_sample_backward_counts.clone().numpy()
+
+########################## NETWORK LOGIC MODIFICAITON ##########################
+class MaskLinear(Interceptor):
+    """
+    Transforms a single BatchLinear module into a masked layer using Interceptor hooks:
+    1. Generates and registers masks as buffers in __init__ (on CPU).
+    2. Uses before_*_forward hooks to apply the mask before computation.
+    3. Registers gradient hooks in before_train to enforce zero gradients during backward pass.
+    """
+    def __init__(self, layer, mask_config):
+        super().__init__()
+        
+        # --- Mandatory Type Check ---
+        if not isinstance(layer, BatchLinear):
+            raise TypeError(
+                f"MaskLinear received an invalid module type: "
+                f"Expected 'BatchLinear', got '{type(layer).__name__}'. "
+                "This interceptor only supports BatchLinear modules."
+            )
+        self.layer = layer
+        
+        self.layer.register_buffer('weight_mask', mask_config['weight_mask'].to(layer.weights.device))
+        self.layer.register_buffer('bias_mask', mask_config['bias_mask'].to(layer.weights.device))
+        
+        self.mask_activities = mask_config['mask_activities']
+        self.mask_gradients = mask_config['mask_gradients']
+        self._apply_mask()
+
+    @torch.no_grad()
+    def _apply_mask(self):
+        """
+        Applies the mask directly to the parameter data. 
+        """
+        if self.mask_activities:
+            self.layer.weights.data *= self.layer.weight_mask
+            self.layer.biases.data *= self.layer.bias_mask
+    
+    # hooks
+    def before_train(self, state):
+        """Registers backward hooks now that the model is on its final device."""
+        print("Transforming BatchLinear module into a masked layer using Interceptor hooks...")
+        
+        if hasattr(self, '_grad_hooks_registered') or not self.mask_gradients:
+            return
+        
+        if self.mask_gradients:
+            print('grads hooked')
+            self.layer.weights.register_hook(lambda grad : grad * self.layer.weight_mask)
+            self.layer.biases.register_hook(lambda grad : grad * self.layer.bias_mask)
+            
+        self._grad_hooks_registered = True
+            
+    def before_train_forward(self, state):
+        """Apply masks before training forward pass."""
+        self._apply_mask()
+
+    def before_test_forward(self, state):
+        """Apply masks before testing forward pass."""
+        self._apply_mask()
+
+############################# AUXILLARY LOSSES ################################
+"""
+These Interceptors make modifications to the loss function before computing 
+gradints and are therefore useful for auxillary losses like L1/L2 regularization.
+"""
+class L1Regularizer(Interceptor):
+    def __init__(self, lambda_l1=0.01, reference_provider=None):
+        super().__init__()
+        if isinstance(lambda_l1, (list, np.ndarray)):
+            self.lambda_l1 = torch.as_tensor(lambda_l1, dtype=torch.float32)
+        else:
+            self.lambda_l1 = lambda_l1
+        
+        if torch.is_tensor(self.lambda_l1) and (self.lambda_l1 < 0).any():
+             raise ValueError("All lambda_l1 values must be non-negative.")
+        elif isinstance(self.lambda_l1, (float, int)) and self.lambda_l1 < 0:
+            raise ValueError("lambda_l1 must be a non-negative number.")
+            
+        self.reference_provider = reference_provider
+
+    def after_train_forward(self, state):
+        n_networks = state['n_networks']
+        device = state['device']
+
+        if torch.is_tensor(self.lambda_l1):
+            lambda_tensor = self.lambda_l1.to(device)
+            if lambda_tensor.ndim == 1 and len(lambda_tensor) != n_networks:
+                raise ValueError(f"Length of lambda_l1 tensor ({len(lambda_tensor)}) must match n_networks ({n_networks}).")
+        elif isinstance(self.lambda_l1, (float, int)):
+            if self.lambda_l1 == 0:
+                return
+            lambda_tensor = self.lambda_l1
+        else:
+            return
+
+
+        reference_point = None
+        if self.reference_provider is not None:
+            reference_point = self.reference_provider.get_parameters()
+
+        l1_penalty = torch.zeros(n_networks, device=device)
+        
+        for name, param in state['model'].named_parameters():
+            if param.requires_grad:
+                if reference_point is not None:
+                    if name not in reference_point:
+                        continue
+                    ref_param = reference_point[name].to(device)
+                    delta = param - ref_param
+                else:
+                    delta = param # else regularize towards zero
+                per_network_norm = delta.abs().sum(dim=tuple(range(1, param.ndim)))
+                l1_penalty += per_network_norm
+                
+        scaled_penalty = l1_penalty * lambda_tensor
+        state['loss'] = state['loss'] + scaled_penalty
+
+class L2Regularizer(Interceptor):
+    def __init__(self, lambda_l2=0.01, reference_provider=None):
+        super().__init__()
+        if isinstance(lambda_l2, (list, np.ndarray)):
+            self.lambda_l2 = torch.as_tensor(lambda_l2, dtype=torch.float32)
+        else:
+            self.lambda_l2 = lambda_l2
+        
+
+        if torch.is_tensor(self.lambda_l2) and (self.lambda_l2 < 0).any():
+             raise ValueError("All lambda_l2 values must be non-negative.")
+        elif isinstance(self.lambda_l2, (float, int)) and self.lambda_l2 < 0:
+            raise ValueError("lambda_l2 must be a non-negative number.")
+
+        self.reference_provider = reference_provider # usually a param provider
+
+    def after_train_forward(self, state):
+
+        n_networks = state['n_networks']
+        device = state['device']
+
+        if torch.is_tensor(self.lambda_l2):
+            lambda_tensor = self.lambda_l2.to(device)
+            if lambda_tensor.ndim == 1 and len(lambda_tensor) != n_networks:
+                raise ValueError(f"Length of lambda_l2 tensor ({len(lambda_tensor)}) must match n_networks ({n_networks}).")
+        elif isinstance(self.lambda_l2, (float, int)):
+            if self.lambda_l2 == 0:
+                return
+            lambda_tensor = self.lambda_l2
+        else:
+            return
+
+
+        reference_point = None
+        if self.reference_provider is not None:
+            reference_point = self.reference_provider.get_parameters()
+
+        l2_penalty_sq = torch.zeros(n_networks, device=device)
+        
+        for name, param in state['model'].named_parameters():
+            if param.requires_grad:
+                if reference_point is not None:
+                    if name not in reference_point:
+                        continue
+                    ref_param = reference_point[name].to(device)
+                    delta = param - ref_param # regularize towards ref.
+                else:
+                    delta = param # else regularize towards zero
+
+                per_network_sum_sq = (delta ** 2).sum(dim=tuple(range(1, param.ndim)))
+                l2_penalty_sq += per_network_sum_sq
+        
+        scaled_penalty = l2_penalty_sq * lambda_tensor
+        
+        state['loss'] = state['loss'] + scaled_penalty
+
+# TODO: in theory replay could be applied to any stat
+# TODO: this might require different logic to handle replay only events
+from lib.samplers import FixedEpochSampler as FixedEpochSampler
+from lib.samplers import collate_fn as collate_fn
+from torch.utils.data import DataLoader
+class MistakeReplay(Interceptor):
+    def __init__(self, data_source, optimizer, replay_frequency, n_replays, batch_size, num_workers=0):
+        super().__init__()
+        self.data_source = data_source
+        self.optimizer = optimizer
+        self.replay_frequency = replay_frequency # TODO: check list
+        self.n_replays = n_replays
+        self.batch_size = batch_size
+        
+    def before_train(self, state):
+        n_networks, device = state['n_networks'], state['device']
+        freq = self.replay_frequency if isinstance(self.replay_frequency, (list, np.ndarray, torch.Tensor)) else [self.replay_frequency] * n_networks
+        replays = self.n_replays if isinstance(self.n_replays, (list, np.ndarray, torch.Tensor)) else [self.n_replays] * n_networks
+        self.replay_frequencies = torch.tensor(freq, device=device)
+        self.n_replays = torch.tensor(replays, device=device)
+    
+    def after_update(self, state):
+        step = state['step']
+        active_on_freq = (self.replay_frequencies > 0) & (step % self.replay_frequencies == 0)
+        if not active_on_freq.any():
+            return
+        
+        per_sample_backward_counts = state['data'].get('per_sample_backward_counts')
+        if per_sample_backward_counts is None:
+            print("⚠️ 'per_sample_backward_counts' not in state. Use PerSampleBackwardCounter(...). Skipping replay.")
+            return
+        
+        max_replays_this_step = self.n_replays[active_on_freq].max().item()
+        idxs_to_replay = [torch.tensor(np.where(n > 0)[0]) if active_on_freq[i] else [] for i, n in enumerate(per_sample_backward_counts.T)]
+        replay_sampler = FixedEpochSampler(self.data_source,
+                                       idxs_to_replay,
+                                       self.batch_size,
+                                       padding_value=state['padding_value'])
+        replay_dataloader = DataLoader(self.data_source,
+                                     batch_sampler=replay_sampler,
+                                     collate_fn=collate_fn(state['n_networks']),
+                                     num_workers=4,
+                                     shuffle=False)
+        for replay_step in range(1, max_replays_this_step+1): # means n_replays [0, 0, 1, 2] gives no replay to 0s
+            active_this_loop = (active_on_freq & (replay_step <= self.n_replays)).float()
+            print(active_this_loop)
+            # do loop
+            for (x, y, idx) in replay_dataloader:
+                x, y, idx = x.to(state['device']), y.to(state['device']), idx.to(state['device']) 
+                if len(x.shape) < 3:
+                    x, y = x.unsqueeze(1), y.unsqueeze(1).repeat((1, state['n_networks'], 1))
+                    idx = idx.unsqueeze(1).repeat(1, state['n_networks'])   
+                state['x'], state['y'], state['idx'] = x, y, idx
+                self.trainer._fire_event('before_update')
+                self.trainer._fire_event('before_train_forward')
+                y_hat = state['model'](x)
+                
+                self.optimizer.zero_grad()
+                
+                per_sample_supervised_loss = state['criterion'](y_hat, y, idx, state['padding_value'])
+                state['per_sample_losses'] = per_sample_supervised_loss
+                mask = (idx != state['padding_value'])
+                n_valid_samples = mask.sum(0)
+                supervised_loss = per_sample_supervised_loss.sum(0) * active_this_loop / (n_valid_samples + 1e-12) # average 
+                state['loss'] = supervised_loss
+                
+                correct = ((y_hat.argmax(-1) == y.argmax(-1)) * (idx != state['padding_value'])).sum(0)
+                state['correct'] = correct
+                
+                self.trainer._fire_event('after_train_forward')
+                                  
+                loss = state['loss']
+                
+                loss.sum().backward()
+                self.trainer._fire_event('before_step')
+                self.optimizer.step()
+                self.trainer._fire_event('after_step')
+                # after_update would cause infinite loop, i know because that use to be here
+        
+############################# PROVIDERS ################################
+"""
+Providers "provide" some kind of value that is often used by multiple other
+Interceptors. This avoid repeated memory allocation. For instance, if 
+multiple Interceptors require the previous parameters, with these they would 
+each store previous parameters. Instead we pass a provider to the Interceptor
+where they can share their use.
+"""
+        
+ # stops repeated memory (i.e. if multiple observers need previous parameters)
+class PreviousParameterProvider(Interceptor):
+    def __init__(self, model=None):
+        super().__init__() # need model for intialization
+        if model is None:
+            self.previous_parameters = {} # lazy init
+        
+    def before_step(self, state): #                          now we need the state
+        self.previous_parameters = {n: p.clone().detach() for n, p in state['model'].named_parameters()}
+    
+    def after_update(self, state):
+        self.previous_parameters = {} # save GPU memory
+        
+    def get_parameters(self):
+        return self.previous_parameters
+    
+class PreviousPreviousParameterProvider(Interceptor):
+    def __init__(self, previous_parameter_provider):
+        super().__init__()
+        self.previous_previous_parameters = {}
+        self.provider = previous_parameter_provider
+    
+    def after_update(self, state):
+        self.previous_previous_parameters = {n: p.clone().detach() 
+                                    for n, p in self.provider.get_parameters().items()}
+        
+    def get_parameters(self):
+        return self.previous_previous_parameters
+        
+        # stops repeated memory
+class InitialParameterProvider(Interceptor):
+    def __init__(self, model=None):
+        super().__init__() # need model for intialization
+        if model is None:
+            self.initial_parameters = {} # lazy init
+        else:
+            self.initial_parameters = {n: p.clone().detach() for n, p in model.named_parameters()}
+        
+    def before_train(self, state): #                          now we need the state
+        if not self.initial_parameters:
+            self.initial_parameters = {n: p.clone().detach() for n, p in state['model'].named_parameters()}
+    
+    def get_parameters(self):
+        return self.initial_parameters
+    
+class EnergyMetricTracker(Interceptor):
+    def __init__(self, p, param_provider, mode, granularity='network', components=['total'], neuron_dim='incoming'):
+        if not isinstance(p, (int, float)) or p < 0:
+            raise ValueError(f"p must be a non-negative number, but got {p}.")
+        if mode not in ['energy', 'minimum_energy']:
+            raise ValueError(f"Invalid mode: {mode}. Must be 'energy' (cumulative) or 'minimum_energy' (norm from initial).")
+        if granularity not in ['network', 'layer', 'neuron']:
+            raise ValueError(f"Invalid granularity: {granularity}. Must be 'network', 'layer', or 'neuron'.")
+            
+        self.p = p
+        self.provider = param_provider
+        self.mode = mode
+        self.granularity = granularity
+        self.components = [components] if isinstance(components, str) else list(components) # Ensure it's a mutable list
+        self.neuron_dim = [neuron_dim] if isinstance(neuron_dim, str) else neuron_dim
+        
+        if not all(c in ['total', 'weight', 'bias'] for c in self.components):
+            raise ValueError("components must be a list with options from: 'total', 'weight', 'bias'")
+
+        # --- Handle 'total' ambiguity for neuronwise granularity ---
+        if self.granularity == 'neuron' and 'total' in self.components:
+            print(f"INFO (Tracker p={self.p}, {self.mode}): For 'neuron' granularity, 'total' is ambiguous. Defaulting to tracking 'weight' and 'bias' components separately.")
+            # Add weight and bias if they aren't there, then remove total.
+            if 'weight' not in self.components:
+                self.components.append('weight')
+            if 'bias' not in self.components:
+                self.components.append('bias')
+            self.components.remove('total')
+            # Remove duplicates if user provided something like ['total', 'weight']
+            self.components = sorted(list(set(self.components)))
+            
+        self.metric = {}
+        self.log_key = self._generate_log_key()
+        
+    def _generate_log_key(self):
+        mode_prefix = 'minimum_energies' if self.mode == 'minimum_energy' else 'energies'
+        return f"{mode_prefix}_l{self.p}_{self.granularity}"
+    
+    def _get_layer_names(self, model):
+        """Helper to get unique layer prefixes from parameter names."""
+        return sorted(list(set([n.split('.')[0] for n, _ in model.named_parameters()])))
+    
+    @torch.no_grad()
+    def before_train(self, state):
+        """Initializes storage for metrics and logs with component substructure."""
+        state['data'][self.log_key] = {comp: {} for comp in self.components}
+
+        if self.granularity == 'layer':
+            for comp in self.components:
+                if comp == 'total':
+                    param_keys = self._get_layer_names(state['model'])
+                    state['data'][self.log_key][comp] = {n: [] for n in param_keys}
+                else:
+                    param_keys = [n for n, _ in state['model'].named_parameters() if self._is_component(n, comp)]
+                    state['data'][self.log_key][comp] = {n: [] for n in param_keys}
+        elif self.granularity == 'neuron':
+            for comp in self.components:
+                param_dict = {}
+                for n, p in state['model'].named_parameters():
+                    if self._is_component(n, comp):
+                        if self._is_component(n, 'bias'):
+                            param_dict[n] = [] # Biases don't have energy direction
+                        else:
+                            param_dict[n] = {n_dim: [] for n_dim in self.neuron_dim}
+                state['data'][self.log_key][comp] = param_dict
+        else: # network
+             for comp in self.components:
+                state['data'][self.log_key][comp] = []
+                
+        if self.mode == 'energy':
+            self._initialize_metric_accumulator(state)
+            
+    def _initialize_metric_accumulator(self, state):
+        """Sets up `self.metric` as a dictionary of component accumulators on the correct device."""
+        device = state['device']
+        self.metric = {comp: {} for comp in self.components}
+        for comp in self.components:
+            dtype = torch.long if self.p == 0 else torch.float
+            if self.granularity == 'network':
+                self.metric[comp] = torch.zeros(state['n_networks'], dtype=dtype, device=device)
+            elif self.granularity == 'layer':
+                self.metric[comp] = {}
+                if comp == 'total':
+                    for name in self._get_layer_names(state['model']):
+                        self.metric[comp][name] = torch.zeros(state['n_networks'], dtype=dtype, device=device)
+                else:
+                    for n, _ in state['model'].named_parameters():
+                        if self._is_component(n, comp):
+                            self.metric[comp][n] = torch.zeros(state['n_networks'], dtype=dtype, device=device)
+            elif self.granularity == 'neuron':
+                self.metric[comp] = {}
+                for n, p in state['model'].named_parameters():
+                    if self._is_component(n, comp):
+                        if self._is_component(n, 'bias'):
+                            self.metric[comp][n] = torch.zeros(p.shape, dtype=dtype, device=device)
+                        else: # Weight
+                            self.metric[comp][n] = {}
+                            for n_dim in self.neuron_dim:
+                                shape = None
+                                if p.ndim >= 3:
+                                    if n_dim == 'incoming': shape = p.shape[:2] # (batch, out_neurons)
+                                    elif n_dim == 'outgoing': shape = (p.shape[0],) + p.shape[2:] # (batch, in_neurons, ...)
+                                if shape is not None:
+                                    self.metric[comp][n][n_dim] = torch.zeros(shape, dtype=dtype, device=device)
+    @torch.no_grad()
+    def after_step(self, state):
+        """For cumulative mode, calculate step-wise delta and accumulate."""
+        if self.mode != 'energy':
+            return # skip minimum
+        
+        ref_params = self.provider.get_parameters()
+        deltas = self._calculate_deltas(state['model'], ref_params)
+        self._accumulate_deltas(deltas)
+        
+    def after_test(self, state):
+        if self.mode == 'energy':
+            metric_to_log = self.metric
+        else:
+            ref_params = self.provider.get_parameters()
+            metric_to_log = self._calculate_deltas(state['model'], ref_params)
+            
+        self._log_metric(state, metric_to_log)
+        
+    @torch.no_grad()
+    def _calculate_deltas(self, model, ref_params):
+        """Core method to compute deltas for weights and biases separately."""
+        # 'neuron' requires a different calculation.
+        if self.granularity == 'neuron':
+            results = {comp: {} for comp in self.components}
+            for n, p in model.named_parameters():
+                delta = p - ref_params[n].to(p.device)
+                
+                is_bias = self._is_component(n, 'bias')
+                
+                # Process biases
+                if is_bias and 'bias' in self.components:
+                    energy = (delta.abs()**self.p)**(1/self.p) if self.p != 0 else (delta != 0).float()
+                    results['bias'][n] = energy
+
+                # Process weights
+                elif not is_bias and 'weight' in self.components and p.ndim >= 3:
+                    neuron_metrics = {}
+                    for n_dim in self.neuron_dim:
+                        sum_dims = tuple(range(2, p.ndim)) if n_dim == 'incoming' else 1
+                        sum_of_pows = (delta.abs()**self.p).sum(dim=sum_dims)
+                        energy = sum_of_pows**(1/self.p) if self.p != 0 else torch.count_nonzero(delta, dim=sum_dims).float()
+                        neuron_metrics[n_dim] = energy
+                    results['weight'][n] = neuron_metrics
+            return results
+
+        # layer and network logic
+        raw_deltas = {'weight': {}, 'bias': {}}
+        for n, p in model.named_parameters():
+            comp_type = 'bias' if ('bias' in n) else 'weight'
+            ref_p = ref_params[n].to(p.device)
+            delta = p - ref_p
+            sum_dims = tuple(range(1, p.ndim))
+            if self.p == 0:
+                raw_deltas[comp_type][n] = torch.count_nonzero(delta, dim=sum_dims)
+            else:
+                raw_deltas[comp_type][n] = (delta.abs()**self.p).sum(dim=sum_dims)
+        
+        results = {}
+        for comp in self.components:
+            if self.granularity == 'network':
+                all_param_deltas = list(raw_deltas['weight'].values()) + list(raw_deltas['bias'].values()) if comp == 'total' else list(raw_deltas[comp].values())
+                sum_of_pows = torch.stack(all_param_deltas).sum(dim=0) if all_param_deltas else torch.tensor(0.0, device=p.device)
+                results[comp] = sum_of_pows**(1 / self.p) if self.p != 0 else sum_of_pows
+            
+            elif self.granularity == 'layer':
+                results[comp] = {}
+                if comp == 'total':
+                    layer_groups = {}
+                    all_raw = {**raw_deltas['weight'], **raw_deltas['bias']}
+                    for n, raw_delta in all_raw.items():
+                        layer_name = n.split('.')[0]
+                        if layer_name not in layer_groups: layer_groups[layer_name] = []
+                        layer_groups[layer_name].append(raw_delta)
+                    for name, raw_list in layer_groups.items():
+                        total_raw = torch.stack(raw_list).sum(dim=0)
+                        results[comp][name] = total_raw**(1/self.p) if self.p != 0 else total_raw
+                else:
+                    for n, raw_d in raw_deltas[comp].items():
+                        results[comp][n] = raw_d**(1/self.p) if self.p != 0 else raw_d
+        return results
+    
+    @torch.no_grad()
+    def _accumulate_deltas(self, deltas):
+        """Accumulates deltas for each component."""
+        for comp, delta_val in deltas.items():
+            if self.granularity == 'network':
+                self.metric[comp] += delta_val
+            elif self.granularity == 'layer':
+                for name, val in delta_val.items():
+                    if name in self.metric[comp]: self.metric[comp][name] += val
+            elif self.granularity == 'neuron':
+                for n, val in delta_val.items():
+                    if n in self.metric[comp]:
+                        if isinstance(val, dict): # Weight
+                            for n_dim, e_val in val.items():
+                                if n_dim in self.metric[comp][n]:
+                                    self.metric[comp][n][n_dim] += e_val
+                        else: # Bias
+                            self.metric[comp][n] += val
+
+    @torch.no_grad()
+    def _log_metric(self, state, metric_to_log):
+        """Appends metrics for each component to the state['data'] dictionary."""
+        for comp, metric in metric_to_log.items():
+            if self.granularity == 'network':
+                state['data'][self.log_key][comp].append(metric.clone().cpu().numpy())
+            elif self.granularity == 'layer':
+                for n, val in metric.items():
+                    if n in state['data'][self.log_key][comp]:
+                        state['data'][self.log_key][comp][n].append(val.clone().cpu().numpy())
+            elif self.granularity == 'neuron':
+                for n, val in metric.items():
+                    if n in state['data'][self.log_key][comp]:
+                        if isinstance(val, dict): # Weight
+                            for n_dim, e_val in val.items():
+                                 if n_dim in state['data'][self.log_key][comp][n]:
+                                    state['data'][self.log_key][comp][n][n_dim].append(e_val.clone().cpu().numpy())
+                        else: # Bias
+                            state['data'][self.log_key][comp][n].append(val.clone().cpu().numpy())
+    
+    def _is_component(self, name, component_type):
+        """Helper to check if a parameter name matches the component type."""
+        is_bias = 'bias' in name
+        if component_type == 'total':
+            return True
+        elif component_type == 'weight':
+            return not is_bias
+        elif component_type == 'bias':
+            return is_bias
+        return False
+
+############################# ENERGY FUNCS ################################
+"""
+This Interceptor generalizes the compute energy calculations (Li & van Rossum 2020) and 
+usually requires a provider. They have been split into network, layerwise and neuronwise
+to get different granularities of energy metrics.
+"""    
+
+class EnergyMetircTracker(Interceptor):
+    """
+    A generalized interceptor to track the delta ("energy") of network parameters.
+
+    It is highly configurable, allowing for tracking based on:
+    - p (int or float): The order of the Lp norm (e.g., 0, 1, 2, 0.5).
+    - mode (str): 'displacement' (vs. initial state) or 'cumulative' (step-by-step).
+    - granularity (str): 'network', 'layerwise', or 'neuronwise'.
+    - components (list): Which parts to track: ['total', 'weight', 'bias'].
+    """
+    def __init__(self, p, param_provider, mode, granularity='network', components=['total'], energy_direction='incoming'):
+        super().__init__()
+        # --- Configuration Validation ---
+        if not isinstance(p, (int, float)) or p < 0:
+            raise ValueError(f"p must be a non-negative number, but got {p}.")
+        if mode not in ['energy', 'minimum_energy']:
+            raise ValueError(f"Invalid mode: {mode}. Must be 'energy' or 'minimum_energy'.")
+        if granularity not in ['network', 'layerwise', 'neuronwise']:
+            raise ValueError(f"Invalid granularity: {granularity}. Must be 'network', 'layerwise', or 'neuronwise'.")
+        
+        self.p = p
+        self.provider = param_provider
+        self.mode = mode
+        self.granularity = granularity
+        self.components = [components] if isinstance(components, str) else list(components) # Ensure it's a mutable list
+        self.energy_direction = [energy_direction] if isinstance(energy_direction, str) else energy_direction
+        
+        if not all(c in ['total', 'weight', 'bias'] for c in self.components):
+            raise ValueError("components must be a list with options from: 'total', 'weight', 'bias'")
+
+        # --- Handle 'total' ambiguity for neuronwise granularity ---
+        if self.granularity == 'neuronwise' and 'total' in self.components:
+            print(f"INFO (Tracker p={self.p}, {self.mode}): For 'neuronwise' granularity, 'total' is ambiguous. Defaulting to tracking 'weight' and 'bias' components separately.")
+            # Add weight and bias if they aren't there, then remove total.
+            if 'weight' not in self.components:
+                self.components.append('weight')
+            if 'bias' not in self.components:
+                self.components.append('bias')
+            self.components.remove('total')
+            # Remove duplicates if user provided something like ['total', 'weight']
+            self.components = sorted(list(set(self.components)))
+
+        self.metric = {}
+        self.log_key = self._generate_log_key()
+
+    def _generate_log_key(self):
+        mode_prefix = 'minimum_energies' if self.mode == 'minimum_energies' else 'energies'
+        return f"{mode_prefix}_l{self.p}_{self.granularity}"
+
+    def _get_layer_names(self, model):
+        """Helper to get unique layer prefixes from parameter names."""
+        return sorted(list(set([n.split('.')[0]+'.layer' for n, _ in model.named_parameters()])))
+
+    @torch.no_grad()
+    def before_train(self, state):
+        """Initializes storage for metrics and logs with component substructure."""
+        state['data'][self.log_key] = {comp: {} for comp in self.components}
+
+        if self.granularity == 'layerwise':
+            for comp in self.components:
+                if comp == 'total':
+                    param_keys = self._get_layer_names(state['model'])
+                    state['data'][self.log_key][comp] = {n: [] for n in param_keys}
+                else:
+                    param_keys = [n for n, _ in state['model'].named_parameters() if self._is_component(n, comp)]
+                    state['data'][self.log_key][comp] = {n: [] for n in param_keys}
+        elif self.granularity == 'neuronwise':
+            for comp in self.components:
+                param_dict = {}
+                for n, p in state['model'].named_parameters():
+                    if self._is_component(n, comp):
+                        if self._is_component(n, 'bias'):
+                            param_dict[n] = [] # Biases don't have energy direction
+                        else:
+                            param_dict[n] = {e_dir: [] for e_dir in self.energy_direction}
+                state['data'][self.log_key][comp] = param_dict
+        else: # network
+             for comp in self.components:
+                state['data'][self.log_key][comp] = []
+                
+        if self.mode == 'energy':
+            self._initialize_metric_accumulator(state)
+            
+    def _initialize_metric_accumulator(self, state):
+        """Sets up `self.metric` as a dictionary of component accumulators on the correct device."""
+        device = state['device']
+        self.metric = {comp: {} for comp in self.components}
+        for comp in self.components:
+            dtype = torch.long if self.p == 0 else torch.float
+            if self.granularity == 'network':
+                self.metric[comp] = torch.zeros(state['n_networks'], dtype=dtype, device=device)
+            elif self.granularity == 'layerwise':
+                self.metric[comp] = {}
+                if comp == 'total':
+                    for name in self._get_layer_names(state['model']):
+                        self.metric[comp][name] = torch.zeros(state['n_networks'], dtype=dtype, device=device)
+                else:
+                    for n, _ in state['model'].named_parameters():
+                        if self._is_component(n, comp):
+                            self.metric[comp][n] = torch.zeros(state['n_networks'], dtype=dtype, device=device)
+            elif self.granularity == 'neuronwise':
+                self.metric[comp] = {}
+                for n, p in state['model'].named_parameters():
+                    if self._is_component(n, comp):
+                        if self._is_component(n, 'bias'):
+                            self.metric[comp][n] = torch.zeros(p.shape, dtype=dtype, device=device)
+                        else: # Weight
+                            self.metric[comp][n] = {}
+                            for e_dir in self.energy_direction:
+                                shape = None
+                                if p.ndim >= 3:
+                                    if e_dir == 'incoming': shape = p.shape[:2] # (batch, out_neurons)
+                                    elif e_dir == 'outgoing': shape = (p.shape[0],) + p.shape[2:] # (batch, in_neurons, ...)
+                                if shape is not None:
+                                    self.metric[comp][n][e_dir] = torch.zeros(shape, dtype=dtype, device=device)
+
+    @torch.no_grad()
+    def after_step(self, state):
+        """For cumulative mode, calculate step-wise delta and accumulate."""
+        if self.mode != 'energy':
+            return
+        
+        ref_params = self.provider.get_parameters()
+        deltas = self._calculate_deltas(state['model'], ref_params)
+        self._accumulate_deltas(deltas)
+        
+    @torch.no_grad()
+    def after_test(self, state):
+        """Logs the final computed metric for the epoch/test run."""
+        if self.mode == 'energy':
+            metric_to_log = self.metric
+        else:  # displacement mode calculates the metric from scratch here
+            ref_params = self.provider.get_parameters()
+            metric_to_log = self._calculate_deltas(state['model'], ref_params)
+
+        self._log_metric(state, metric_to_log)
+    
+    @torch.no_grad()
+    def _calculate_deltas(self, model, ref_params):
+        """Core method to compute deltas for weights and biases separately."""
+        # Neuronwise requires a different calculation path, handle it first.
+        if self.granularity == 'neuronwise':
+            results = {comp: {} for comp in self.components}
+            for n, p in model.named_parameters():
+                delta = p - ref_params[n].to(p.device)
+                
+                is_bias = self._is_component(n, 'bias')
+                
+                # Process biases
+                if is_bias and 'bias' in self.components:
+                    energy = (delta.abs()**self.p)**(1/self.p) if self.p != 0 else (delta != 0).float()
+                    results['bias'][n] = energy
+
+                # Process weights
+                elif not is_bias and 'weight' in self.components and p.ndim >= 3:
+                    neuron_metrics = {}
+                    for e_dir in self.energy_direction:
+                        sum_dims = tuple(range(2, p.ndim)) if e_dir == 'incoming' else 1
+                        sum_of_pows = (delta.abs()**self.p).sum(dim=sum_dims)
+                        energy = sum_of_pows**(1/self.p) if self.p != 0 else torch.count_nonzero(delta, dim=sum_dims).float()
+                        neuron_metrics[e_dir] = energy
+                    results['weight'][n] = neuron_metrics
+            return results
+
+        # --- Logic for Network and Layerwise ---
+        raw_deltas = {'weight': {}, 'bias': {}}
+        for n, p in model.named_parameters():
+            comp_type = 'bias' if ('bias' in n) else 'weight'
+            ref_p = ref_params[n].to(p.device)
+            delta = p - ref_p
+            sum_dims = tuple(range(1, p.ndim))
+            if self.p == 0:
+                raw_deltas[comp_type][n] = torch.count_nonzero(delta, dim=sum_dims)
+            else:
+                raw_deltas[comp_type][n] = (delta.abs()**self.p).sum(dim=sum_dims)
+        
+        results = {}
+        for comp in self.components:
+            if self.granularity == 'network':
+                all_param_deltas = list(raw_deltas['weight'].values()) + list(raw_deltas['bias'].values()) if comp == 'total' else list(raw_deltas[comp].values())
+                sum_of_pows = torch.stack(all_param_deltas).sum(dim=0) if all_param_deltas else torch.tensor(0.0, device=p.device)
+                results[comp] = sum_of_pows**(1 / self.p) if self.p != 0 else sum_of_pows
+            
+            elif self.granularity == 'layerwise':
+                results[comp] = {}
+                if comp == 'total':
+                    layer_groups = {}
+                    all_raw = {**raw_deltas['weight'], **raw_deltas['bias']}
+                    for n, raw_delta in all_raw.items():
+                        layer_name = n.split('.')[0]
+                        if layer_name not in layer_groups: layer_groups[layer_name] = []
+                        layer_groups[layer_name].append(raw_delta)
+                    for name, raw_list in layer_groups.items():
+                        total_raw = torch.stack(raw_list).sum(dim=0)
+                        results[comp][name] = total_raw**(1/self.p) if self.p != 0 else total_raw
+                else:
+                    for n, raw_d in raw_deltas[comp].items():
+                        results[comp][n] = raw_d**(1/self.p) if self.p != 0 else raw_d
+        return results
+
+    @torch.no_grad()
+    def _accumulate_deltas(self, deltas):
+        """Accumulates deltas for each component."""
+        for comp, delta_val in deltas.items():
+            if self.granularity == 'network':
+                self.metric[comp] += delta_val
+            elif self.granularity == 'layerwise':
+                for name, val in delta_val.items():
+                    if name in self.metric[comp]: self.metric[comp][name] += val
+            elif self.granularity == 'neuronwise':
+                for n, val in delta_val.items():
+                    if n in self.metric[comp]:
+                        if isinstance(val, dict): # Weight
+                            for e_dir, e_val in val.items():
+                                if e_dir in self.metric[comp][n]:
+                                    self.metric[comp][n][e_dir] += e_val
+                        else: # Bias
+                            self.metric[comp][n] += val
+
+    @torch.no_grad()
+    def _log_metric(self, state, metric_to_log):
+        """Appends metrics for each component to the state['data'] dictionary."""
+        for comp, metric in metric_to_log.items():
+            if self.granularity == 'network':
+                state['data'][self.log_key][comp].append(metric.clone().cpu().numpy())
+            elif self.granularity == 'layerwise':
+                for n, val in metric.items():
+                    if n in state['data'][self.log_key][comp]:
+                        state['data'][self.log_key][comp][n].append(val.clone().cpu().numpy())
+            elif self.granularity == 'neuronwise':
+                for n, val in metric.items():
+                    if n in state['data'][self.log_key][comp]:
+                        if isinstance(val, dict): # Weight
+                            for e_dir, e_val in val.items():
+                                 if e_dir in state['data'][self.log_key][comp][n]:
+                                    state['data'][self.log_key][comp][n][e_dir].append(e_val.clone().cpu().numpy())
+                        else: # Bias
+                            state['data'][self.log_key][comp][n].append(val.clone().cpu().numpy())
+
+    def _is_component(self, name, component_type):
+        """Helper to check if a parameter name matches the component type."""
+        is_bias = 'bias' in name
+        if component_type == 'total':
+            return True
+        elif component_type == 'weight':
+            return not is_bias
+        elif component_type == 'bias':
+            return is_bias
+        return False
+                
+############################### INTERCEPTOR GRAVEYARD #############################     
+"""
+Interceptors here have been superseded by other Interceptor above. For instance,
+TestLoop now implements the testing accuracy and loss trackers internally since
+it keeps track of valid samples and can appropriately normalise values.
+"""      
+                
+                
 class RunningLossTracker(Interceptor):
     def __init__(self):
         super().__init__()
@@ -444,324 +1438,7 @@ class AccuracyTracker(Interceptor):
         self._reset_test(state)
         state['data']['running_accuracies'].append(self.train_accuracy.clone().detach().cpu().numpy())
         self._reset_train(state)
-
-
-############################# COUNTERS ################################
-"""
-These Interceptors primarily deal with counting items: forward passes,
-the number of items in a forward pass (i.e. batching), the number of 
-items actually used for learning, etc.
-"""
-
-class ForwardPassCounter(Interceptor):
-    def __init__(self):
-        super().__init__()
-
-    def before_train(self, state):
-        n_networks = state['n_networks']
-        self.forward_pass_counts = torch.zeros(n_networks, dtype=torch.long)
-        state['data']['forward_pass_counts'] = []
-
-    def after_update(self, state):
-        idx = state.get('idx')
-        padding_value = state.get('padding_value', -1)
-
-        if idx is None:
-            return
-
-        is_valid = (idx != padding_value)
-        passes_this_batch = is_valid.any(dim=0).long()
         
-        self.forward_pass_counts += passes_this_batch.cpu()
-
-    def after_test(self, state):
-        state['data']['forward_pass_counts'].append(self.forward_pass_counts.clone().numpy())
-
-class ForwardItemCounter(Interceptor):
-    def __init__(self):
-        super().__init__()
-
-    def before_train(self, state):
-        n_networks = state['n_networks']
-        self.forward_item_counts = torch.zeros(n_networks, dtype=torch.long)
-        state['data']['forward_item_counts'] = []
-
-    def after_update(self, state):
-        idx = state.get('idx')
-        padding_value = state.get('padding_value', -1)
-
-        if idx is None:
-            return
-
-        is_valid = (idx != padding_value)
-        items_this_batch = is_valid.sum(dim=0).long()
-
-        self.forward_item_counts += items_this_batch.cpu()
-
-    def after_test(self, state):
-        """Logs the current counts to the data dictionary."""
-        state['data']['forward_item_counts'].append(self.forward_item_counts.clone().numpy())
-        
-class BackwardPassCounter(Interceptor):
-    def __init__(self):
-        super().__init__()
-
-    def before_train(self, state):
-        self.backward_pass_counts = torch.zeros(state['n_networks'], dtype=torch.long)
-        state['data']['backward_pass_counts'] = []
-
-    def after_update(self, state):
-        per_sample_loss = state.get('per_sample_losses')
-        if per_sample_loss is None: return
-        
-        was_updated_mask = (per_sample_loss > 1e-9) # eps for rounding errors
-        
-        updates_this_batch = was_updated_mask.any(dim=0).long()
-        self.backward_pass_counts += updates_this_batch.cpu()
-
-    def after_test(self, state):
-        state['data']['backward_pass_counts'].append(self.backward_pass_counts.clone().numpy())
-
-class BackwardItemCounter(Interceptor):
-    def __init__(self):
-        super().__init__()
-
-    def before_train(self, state):
-        self.backward_item_counts = torch.zeros(state['n_networks'], dtype=torch.long)
-        state['data']['backward_item_counts'] = []
-
-    def after_update(self, state):
-        per_sample_loss = state.get('per_sample_losses')
-        if per_sample_loss is None: return
-
-        was_updated_mask = (per_sample_loss > 1e-9) # eps for rounding errors
-
-        updated_items_this_batch = was_updated_mask.sum(dim=0).long()
-        self.backward_item_counts += updated_items_this_batch.cpu()
-
-    def after_test(self, state):
-        state['data']['backward_item_counts'].append(self.backward_item_counts.clone().numpy())
-        
-class PerSampleBackwardCounter(Interceptor):
-    def __init__(self, max_samples):
-        super().__init__()
-        if not isinstance(max_samples, int) or max_samples <= 0:
-            raise ValueError("max_samples must be a positive integer.")
-        self.max_samples = max_samples
-
-    def before_train(self, state):
-        n_networks = state['n_networks']
-        self.per_sample_backward_counts = torch.zeros((self.max_samples, n_networks), dtype=torch.long)
-        state['data']['per_sample_backward_counts'] = self.per_sample_backward_counts
-
-    def after_update(self, state):
-        per_sample_loss = state.get('per_sample_losses').cpu()
-        idx = state.get('idx').cpu()
-
-        if per_sample_loss is None or idx is None:
-            return
-
-        # get indices of valid samples that contributed to the loss
-        update_coords = torch.where(
-            (per_sample_loss > 1e-9) & (idx != state.get('padding_value', -1)) # eps for rounding errors
-        )
-        
-        if update_coords[0].numel() == 0:
-            return 
-
-                            #    Gemini-Pro 2.5 tip
-                            #             |
-                            #             V
-        self.per_sample_backward_counts.index_put_(
-            (idx[update_coords], update_coords[1]),
-            torch.tensor(1, device='cpu'),
-            accumulate=True
-        )
-
-    def after_train(self, state):
-        state['data']['per_sample_backward_counts'] = self.per_sample_backward_counts.clone().numpy()
-
-########################## NETWORK LOGIC MODIFICAITON ##########################
-# class MaskLinear(Interceptor):
-#     """
-#     Transforms a single BatchLinear module into a masked layer using Interceptor hooks:
-#     1. Generates and registers masks as buffers in __init__ (on CPU).
-#     2. Uses before_*_forward hooks to apply the mask before computation.
-#     3. Registers gradient hooks in before_train to enforce zero gradients during backward pass.
-#     """
-#     def __init__(self, layer, n_ins, n_outs, init_method = None, init_config = None):
-#         super().__init__()
-        
-#         # --- Mandatory Type Check ---
-#         if not isinstance(layer, BatchLinear):
-#             raise TypeError(
-#                 f"MaskLinear received an invalid module type: "
-#                 f"Expected 'BatchLinear', got '{type(layer).__name__}'. "
-#                 "This interceptor only supports BatchLinear modules."
-#             )
-        
-#         # --- Store necessary configuration ---
-#         self.layer = layer
-#         self.n_linears = layer.n_linears
-#         if isinstance(n_ins, int):
-#             n_ins = [n_ins]*self.n_linears
-#         if isinstance(n_outs, int):
-#             n_outs = [n_outs]*self.n_linears
-#         print(n_outs)
-#         n_in, n_out = max(n_ins), max(n_outs)
-#         self.n_in, self.n_out = n_in, n_out
-#         self.n_ins, self.n_outs = n_ins, n_outs
-        
-#         # Ensure dimensional configuration matches n_linears of the single layer
-#         n_linears = self.layer.n_linears
-#         if len(n_ins) != n_linears or len(n_outs) != n_linears:
-#              raise ValueError(f"n_ins and n_outs must have length equal to layer.n_linears ({n_linears}).")
-
-#         # Store config, setting to default empty dict if None was passed
-#         self.init_method = init_method
-#         self.init_config = init_config if init_config is not None else {}
-        
-#         # --- Initialization moved to __init__ ---
-#         self._init_masks()
-#         if self.init_config:
-#             self._init_weights(init_method, **init_config)
-#         self._apply_mask()
-            
-#         #self._initialize_masks_and_weights()
-        
-#     def _init_masks(self):
-#         device = self.layer.weights.device
-#         w_mask = torch.zeros((self.n_linears, self.n_out, self.n_in)).to(device)
-#         b_mask = torch.zeros((self.n_linears, self.n_out)).to(device)
-#         with torch.no_grad():
-#             for i in range(self.n_linears):
-#                 # mask incoming
-#                 n_active_in, n_active_out = self.n_ins[i], self.n_outs[i]
-#                 w_mask[i][:n_active_out, :n_active_in] = torch.ones((n_active_out, n_active_in)).to(device)
-#                 b_mask[i][:n_active_out] = torch.ones((n_active_out,)).to(device)
-#                 print(w_mask[i])
-#         self.layer.register_buffer('weight_mask', w_mask)
-#         self.layer.register_buffer('bias_mask', b_mask)
-        
-#     # since we zero out parts of the tensor we need special handling for fan_in/fan_out.
-#     def _init_weights(self, method, **kwargs):
-#         if method is None:
-#             method = 'kaiming_uniform'
-#             kwargs.setdefault('a', math.sqrt(5))
-            
-#         init_map = {
-#             'uniform': nn.init.uniform_,
-#             'normal': nn.init.normal_,
-#             'kaiming_uniform': nn.init.kaiming_uniform_,
-#             'kaiming_normal': nn.init.kaiming_normal_,
-#             'xavier_uniform': nn.init.xavier_uniform_,
-#             'xavier_normal': nn.init.xavier_normal_,
-#             'zeros': nn.init.zeros_,
-#             'ones': nn.init.ones_,
-#         }
-
-#         method = method.lower()
-        
-#         with torch.no_grad():
-#             for i in range(len(self.layer.weights)):
-#                 current_kwargs = {}
-#                 for key, value in kwargs.items():
-#                     if isinstance(value, (list, np.ndarray)):
-#                         if len(value) != self.n_linears:
-#                             raise ValueError(
-#                                 f"Length of kwarg '{key}' ({len(value)}) must match "
-#                                 f"the number of weights ({self.n_linears})."
-#                             )
-#                         current_kwargs[key] = value[i]
-#                     else:
-#                         current_kwargs[key] = value
-#                 n_active_in, n_active_out = self.n_ins[i], self.n_outs[i]
-#                 init_map[method](self.layer.weights[i][:n_active_out, :n_active_in], **current_kwargs)
-
-#     @torch.no_grad()
-#     def _apply_mask(self):
-#         """
-#         Applies the mask directly to the parameter data. 
-#         """
-#         self.layer.weights.data *= self.layer.weight_mask
-#         self.layer.biases.data *= self.layer.bias_mask
-    
-#     # hooks
-#     def before_train(self, state):
-#         """Registers backward hooks now that the model is on its final device."""
-#         print("Transforming BatchLinear module into a masked layer using Interceptor hooks...")
-#         self.layer.self.layer.weight_mask.to(state['device'])
-#         self.layer.bias_mask = self.layer.bias_mask.to(state['device'])
-
-#         self.layer.weights.register_hook(lambda grad : grad * self.layer.weight_mask)
-#         self.layer.biases.register_hook(lambda grad : grad * self.layer.bias_mask)
-            
-#     def before_train_forward(self, state):
-#         """Apply masks before training forward pass."""
-#         self._apply_mask()
-
-#     def before_test_forward(self, state):
-#         """Apply masks before testing forward pass."""
-#         self._apply_mask()
-        
-class MaskLinear(Interceptor):
-    """
-    Transforms a single BatchLinear module into a masked layer using Interceptor hooks:
-    1. Generates and registers masks as buffers in __init__ (on CPU).
-    2. Uses before_*_forward hooks to apply the mask before computation.
-    3. Registers gradient hooks in before_train to enforce zero gradients during backward pass.
-    """
-    def __init__(self, layer, mask_config):
-        super().__init__()
-        
-        # --- Mandatory Type Check ---
-        if not isinstance(layer, BatchLinear):
-            raise TypeError(
-                f"MaskLinear received an invalid module type: "
-                f"Expected 'BatchLinear', got '{type(layer).__name__}'. "
-                "This interceptor only supports BatchLinear modules."
-            )
-        self.layer = layer
-        
-        self.layer.register_buffer('weight_mask', mask_config['weight_mask'].to(layer.weights.device))
-        self.layer.register_buffer('bias_mask', mask_config['bias_mask'].to(layer.weights.device))
-        
-        self.mask_activities = mask_config['mask_activities']
-        self.mask_gradients = mask_config['mask_gradients']
-        self._apply_mask()
-
-    @torch.no_grad()
-    def _apply_mask(self):
-        """
-        Applies the mask directly to the parameter data. 
-        """
-        if self.mask_activities:
-            self.layer.weights.data *= self.layer.weight_mask
-            self.layer.biases.data *= self.layer.bias_mask
-    
-    # hooks
-    def before_train(self, state):
-        """Registers backward hooks now that the model is on its final device."""
-        print("Transforming BatchLinear module into a masked layer using Interceptor hooks...")
-        
-        if hasattr(self, '_grad_hooks_registered') or not self.mask_gradients:
-            return
-        
-        if self.mask_gradients:
-            print('grads hooked')
-            self.layer.weights.register_hook(lambda grad : grad * self.layer.weight_mask)
-            self.layer.biases.register_hook(lambda grad : grad * self.layer.bias_mask)
-            
-        self._grad_hooks_registered = True
-            
-    def before_train_forward(self, state):
-        """Apply masks before training forward pass."""
-        self._apply_mask()
-
-    def before_test_forward(self, state):
-        """Apply masks before testing forward pass."""
-        self._apply_mask()
-
 # TODO: make batch optimizers [Done!]
 # This is now performed by batch_optimizers
 #              |
@@ -796,184 +1473,7 @@ class PerNetworkLearningRate(Interceptor):
             return grad * lr_scales_reshaped.to(grad.device)
             
         return hook
-
-############################# AUXILLARY LOSSES ################################
-"""
-These Interceptors make modifications to the loss function before computing 
-gradints and are therefore useful for auxillary losses like L1/L2 regularization.
-"""
-class L1Regularizer(Interceptor):
-    def __init__(self, lambda_l1=0.01, reference_provider=None):
-        super().__init__()
-        if isinstance(lambda_l1, (list, np.ndarray)):
-            self.lambda_l1 = torch.as_tensor(lambda_l1, dtype=torch.float32)
-        else:
-            self.lambda_l1 = lambda_l1
-        
-        if torch.is_tensor(self.lambda_l1) and (self.lambda_l1 < 0).any():
-             raise ValueError("All lambda_l1 values must be non-negative.")
-        elif isinstance(self.lambda_l1, (float, int)) and self.lambda_l1 < 0:
-            raise ValueError("lambda_l1 must be a non-negative number.")
-            
-        self.reference_provider = reference_provider
-
-    def after_train_forward(self, state):
-        n_networks = state['n_networks']
-        device = state['device']
-
-        if torch.is_tensor(self.lambda_l1):
-            lambda_tensor = self.lambda_l1.to(device)
-            if lambda_tensor.ndim == 1 and len(lambda_tensor) != n_networks:
-                raise ValueError(f"Length of lambda_l1 tensor ({len(lambda_tensor)}) must match n_networks ({n_networks}).")
-        elif isinstance(self.lambda_l1, (float, int)):
-            if self.lambda_l1 == 0:
-                return
-            lambda_tensor = self.lambda_l1
-        else:
-            return
-
-
-        reference_point = None
-        if self.reference_provider is not None:
-            reference_point = self.reference_provider.get_parameters()
-
-        l1_penalty = torch.zeros(n_networks, device=device)
-        
-        for name, param in state['model'].named_parameters():
-            if param.requires_grad:
-                if reference_point is not None:
-                    if name not in reference_point:
-                        continue
-                    ref_param = reference_point[name].to(device)
-                    delta = param - ref_param
-                else:
-                    delta = param # else regularize towards zero
-                per_network_norm = delta.abs().sum(dim=tuple(range(1, param.ndim)))
-                l1_penalty += per_network_norm
-                
-        scaled_penalty = l1_penalty * lambda_tensor
-        state['loss'] = state['loss'] + scaled_penalty
-
-class L2Regularizer(Interceptor):
-    def __init__(self, lambda_l2=0.01, reference_provider=None):
-        super().__init__()
-        if isinstance(lambda_l2, (list, np.ndarray)):
-            self.lambda_l2 = torch.as_tensor(lambda_l2, dtype=torch.float32)
-        else:
-            self.lambda_l2 = lambda_l2
-        
-
-        if torch.is_tensor(self.lambda_l2) and (self.lambda_l2 < 0).any():
-             raise ValueError("All lambda_l2 values must be non-negative.")
-        elif isinstance(self.lambda_l2, (float, int)) and self.lambda_l2 < 0:
-            raise ValueError("lambda_l2 must be a non-negative number.")
-
-        self.reference_provider = reference_provider # usually a param provider
-
-    def after_train_forward(self, state):
-
-        n_networks = state['n_networks']
-        device = state['device']
-
-        if torch.is_tensor(self.lambda_l2):
-            lambda_tensor = self.lambda_l2.to(device)
-            if lambda_tensor.ndim == 1 and len(lambda_tensor) != n_networks:
-                raise ValueError(f"Length of lambda_l2 tensor ({len(lambda_tensor)}) must match n_networks ({n_networks}).")
-        elif isinstance(self.lambda_l2, (float, int)):
-            if self.lambda_l2 == 0:
-                return
-            lambda_tensor = self.lambda_l2
-        else:
-            return
-
-
-        reference_point = None
-        if self.reference_provider is not None:
-            reference_point = self.reference_provider.get_parameters()
-
-        l2_penalty_sq = torch.zeros(n_networks, device=device)
-        
-        for name, param in state['model'].named_parameters():
-            if param.requires_grad:
-                if reference_point is not None:
-                    if name not in reference_point:
-                        continue
-                    ref_param = reference_point[name].to(device)
-                    delta = param - ref_param # regularize towards ref.
-                else:
-                    delta = param # else regularize towards zero
-
-                per_network_sum_sq = (delta ** 2).sum(dim=tuple(range(1, param.ndim)))
-                l2_penalty_sq += per_network_sum_sq
-        
-        scaled_penalty = l2_penalty_sq * lambda_tensor
-        
-        state['loss'] = state['loss'] + scaled_penalty
-        
-############################# PROVIDERS ################################
-"""
-Providers "provide" some kind of value that is often used by multiple other
-Interceptors. This avoid repeated memory allocation. For instance, if 
-multiple Interceptors require the previous parameters, with these they would 
-each store previous parameters. Instead we pass a provider to the Interceptor
-where they can share their use.
-"""
-        
- # stops repeated memory (i.e. if multiple observers need previous parameters)
-class PreviousParameterProvider(Interceptor):
-    def __init__(self):
-        super().__init__() #                                   need model for intialization 
-        self.previous_parameters = {}
-        
-    def before_update(self, state): #                          now we need the state
-        self.previous_parameters = {n: p.clone().detach() for n, p in state['model'].named_parameters()}
     
-    def after_update(self, state):
-        self.previous_parameters = {} # save GPU memory
-        
-    def get_parameters(self):
-        return self.previous_parameters
-    
-class PreviousPreviousParameterProvider(Interceptor):
-    def __init__(self, previous_parameter_provider):
-        super().__init__()
-        self.previous_previous_parameters = {}
-        self.provider = previous_parameter_provider
-    
-    def after_update(self, state):
-        self.previous_previous_parameters = {n: p.clone().detach() 
-                                    for n, p in self.provider.get_parameters().items()}
-        
-    def get_parameters(self):
-        return self.previous_previous_parameters
-        
-        # stops repeated memory
-class InitialParameterProvider(Interceptor):
-    def __init__(self, model=None):
-        super().__init__() # need model for intialization
-        if model is None:
-            self.initial_parameters = {} # lazy init
-        else:
-            self.initial_parameters = {n: p.clone().detach() for n, p in model.named_parameters()}
-        
-    def before_train(self, state): #                          now we need the state
-        if not self.initial_parameters:
-            self.initial_parameters = {n: p.clone().detach() for n, p in state['model'].named_parameters()}
-    
-    def get_parameters(self):
-        return self.initial_parameters
-
-############################# ENERGY FUNCS ################################
-"""
-These Interceptors compute energy calculations (Li & van Rossum 2020) and 
-usually require a provider. They have been split into network, layerwise and neuronwise
-to get different granularities of energy metrics. However, below we define 
-Handlers which are (slightly) more efficient when using multiple parameter
-trackers simultaneously. Since each energy function requires tracking parameters
-we need to loop over each layer for each tracker we use. Sometimes this loop
-is negiligble compared to the tensor operations.
-"""    
-
 class MinimumEnergyL1NetworkTracker(Interceptor):
     def __init__(self, initial_parameter_provider):
         self.provider = initial_parameter_provider
@@ -1224,7 +1724,55 @@ Interceptor for each data we're interested in. However, if these loop over
 parameters then we make multiple calls for a loop. Instead, ParameterIterator
 takes multiple of these Interceptors (termed Handlers) and calls them for each
 parameter.
+
+    for interceptor in interceptors                    for layer in layers
+         for layer in interceptor.layers      vs.           interceptor1_func(layer)
+             func(layer)                                    interceptor2_func(layer)
 """
+
+class ParameterIterator(Interceptor):
+    """
+    An interceptor that efficiently loops over parameters and dispatches to
+    handlers based on their registered events, preventing wasteful computation.
+    """
+    def __init__(self, handlers):
+        super().__init__()
+        self.handlers = handlers
+        # Pre-compute which handlers listen to which events for max performance
+        self.event_map = self._map_events(handlers)
+
+    def _map_events(self, handlers):
+        event_map = {}
+        for handler in handlers:
+            for event_name, funcs in handler.events.items():
+                for func_type in funcs: # 'func' or 'log'
+                    key = f"{event_name}_{func_type}"
+                    if key not in event_map:
+                        event_map[key] = []
+                    event_map[key].append(handler)
+        return event_map
+
+    def _dispatch(self, state, event_key):
+        if event_key not in self.event_map:
+            return # No handlers are listening, do nothing.
+
+        if event_key.endswith('_func'):
+            for n, p in state['model'].named_parameters():
+                for handler in self.event_map[event_key]:
+                    getattr(handler, event_key)(n, p, state)
+        else: # _log
+            for handler in self.event_map[event_key]:
+                getattr(handler, event_key)(state)
+
+    def before_train(self, state): self._dispatch(state, 'before_train_log')
+    def before_test(self, state): self._dispatch(state, 'before_test_log')
+    def after_step(self, state):
+        self._dispatch(state, 'after_step_func')
+        self._dispatch(state, 'after_step_log')
+    def after_test(self, state):
+        self._dispatch(state, 'after_test_func')
+        self._dispatch(state, 'after_test_log')
+        
 class ParameterIterator(Interceptor):
     def __init__(self, handlers):
         self.handlers = handlers
@@ -1297,7 +1845,7 @@ class ParameterIterator(Interceptor):
         
         if self._should_run('log', 'after_test'):
             self._log(state, 'after_test')
-            
+
 ########################### HANDLERS ################################
 """
 Handlers "handle" parameters during a loop over parameters. They require a

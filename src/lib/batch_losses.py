@@ -6,7 +6,7 @@ import numpy as np
 
 # TODO: I think MSE should always average the outputs and reduction only applies to batch
 class MSELoss(nn.Module):
-    def __init__(self, per_sample=False, reduction='mean'):
+    def __init__(self, reduction='mean'):
         """
         Args:
             reduction (str): The reduction operation to apply: 'mean' or 'sum'.
@@ -17,30 +17,24 @@ class MSELoss(nn.Module):
         super().__init__()
         if reduction not in ['mean', 'sum']:
             raise ValueError(f"Invalid reduction type: {reduction}. Must be 'mean' or 'sum'.")
-        self.reduction = reduction
-        self.per_sample = per_sample
+        self.reduction = reduction # how to reduce last dim
         # initialize the core loss function to get per-element losses
         self.loss_fn = nn.MSELoss(reduction='none')
 
-    def forward(self, y_hat, y, idx=None):
+    def forward(self, y_hat, y, idx=None, padding_value=-1):
         unreduced_loss = self.loss_fn(y_hat, y)
-        if self.per_sample:
-            # reduce only output dim
-            dims_to_reduce = -1
-        else:
-            # reduce batch and output dim
-            dims_to_reduce = (0, -1)
 
 
+        mask = (idx != padding_value).float()  # get padded items
         if self.reduction == 'mean':
-            loss = torch.mean(unreduced_loss, dim=dims_to_reduce)
+            loss = torch.mean(unreduced_loss, dim=-1) * mask
         else: # self.reduction == 'sum'
-            loss = torch.sum(unreduced_loss, dim=dims_to_reduce)
+            loss = torch.sum(unreduced_loss, dim=-1) * mask
 
         return loss
     
 class MAELoss(nn.Module):
-    def __init__(self, per_sample=False, reduction='mean'):
+    def __init__(self, reduction='mean'):
         """
         Args:
             reduction (str): The reduction operation to apply: 'mean' or 'sum'.
@@ -52,29 +46,22 @@ class MAELoss(nn.Module):
         if reduction not in ['mean', 'sum']:
             raise ValueError(f"Invalid reduction type: {reduction}. Must be 'mean' or 'sum'.")
         self.reduction = reduction
-        self.per_sample = per_sample
         # initialize the core loss function to get per-element losses
         self.loss_fn = nn.L1Loss(reduction='none')
 
-    def forward(self, y_hat, y, idx=None):
+    def forward(self, y_hat, y, idx=None, padding_value=-1):
         unreduced_loss = self.loss_fn(y_hat, y)
-        if self.per_sample:
-            # reduce only output dim
-            dims_to_reduce = -1
-        else:
-            # reduce batch and output dim
-            dims_to_reduce = (0, -1)
-
-
+            
+        mask = (idx != padding_value).float()  # get padded items
         if self.reduction == 'mean':
-            loss = torch.mean(unreduced_loss, dim=dims_to_reduce)
+            loss = torch.mean(unreduced_loss, dim=-1) * mask
         else: # self.reduction == 'sum'
-            loss = torch.sum(unreduced_loss, dim=dims_to_reduce)
+            loss = torch.sum(unreduced_loss, dim=-1) * mask
 
         return loss
 
-class HingeLoss(nn.Module):
-    def __init__(self, per_sample=False, reduction='sum', func=nn.ReLU(), margin=1.0):
+class HingeLoss(nn.Module): # conventionally Hinge is reduced by sum
+    def __init__(self, reduction='sum', func=nn.ReLU(), margin=1.0):
         """
         Args:
             reduction (str): The reduction operation to apply: 'mean' or 'sum'.
@@ -88,7 +75,6 @@ class HingeLoss(nn.Module):
         if reduction not in ['mean', 'sum']:
             raise ValueError(f"Invalid reduction type: {reduction}. Must be 'mean' or 'sum'.")
         self.reduction = reduction
-        self.per_sample = per_sample
         self.func = func
         
         if isinstance(margin, torch.Tensor) and len(margin.shape) == 1:
@@ -98,24 +84,23 @@ class HingeLoss(nn.Module):
             margin = torch.tensor(margin).unsqueeze(0).unsqueeze(-1)
         self.margin = margin
 
-    def forward(self, y_hat, y, idx=None):
+    def forward(self, y_hat, y, idx=None, padding_value=-1):
         self.margin = self.margin.to(y_hat.device)
         target_activities = torch.sum(y_hat * y, dim=-1, keepdim=True)
         margins = self.margin + y_hat - target_activities
         loss_terms = self.func(margins)
         unreduced_loss = loss_terms * (y < 1)
-        if self.per_sample:
-            dims_to_reduce = -1
-        else:
-            dims_to_reduce = (0, -1)
+            
+        mask = (idx != padding_value).float()  # get padded items
         if self.reduction == 'mean':
-            loss = torch.mean(unreduced_loss, dim=dims_to_reduce)
+            loss = torch.mean(unreduced_loss, dim=-1) * mask
         else: # self.reduction == 'sum'
-            loss = torch.sum(unreduced_loss, dim=dims_to_reduce)
+            loss = torch.sum(unreduced_loss, dim=-1) * mask
         return loss
 
 class CrossEntropyLoss(nn.Module):
-    def __init__(self, per_sample=False, reduction='mean'):
+    def __init__(self, reduction='mean', confidence_threshold=0.0): # cross-entropy already reduces last dim #
+                                          # this is only here for consistency
         """
         Args:
             reduction (str): How to reduce the batch (sum them or mean them)
@@ -127,71 +112,57 @@ class CrossEntropyLoss(nn.Module):
         if reduction not in ['mean', 'sum']:
             raise ValueError(f"Invalid reduction type: {reduction}. Must be 'mean' or 'sum'.")
         self.reduction = reduction
-        self.per_sample = per_sample
         # initialize the core loss function to get per-element losses
         self.loss_fn = nn.CrossEntropyLoss(reduction='none')
+        self.confidence_threshold = confidence_threshold
 
-    def forward(self, y_hat, y, idx=None):
+    def forward(self, y_hat, y, idx=None, padding_value=-1):
         unreduced_loss = self.loss_fn(y_hat.transpose(1, -1), y.transpose(1, -1))
-        if self.per_sample:
-            loss = unreduced_loss # cross entropy is already per-sample
-        else:
-            if self.reduction == 'mean':
-                loss = torch.mean(unreduced_loss, dim=0)
-            else:
-                loss = torch.sum(unreduced_loss, dim=0)
+        if self.confidence_threshold > 0:
+            probs = F.softmax(y_hat, dim=-1)
+            confidence = (probs * y).sum(-1)
+            confidence_mask = (confidence < self.confidence_threshold).float()
+            unreduced_loss = unreduced_loss * confidence_mask
+        mask = (idx != padding_value).float() # get padded items
+
+        loss = unreduced_loss * mask # cross entropy is already per-sample
         return loss
 
 class LazyLoss(nn.Module):
-    def __init__(self, loss_fn, reduction='mean', per_sample=True, padding_value=-1):
-        super().__init__()
-        self.wrapped_loss_fn = loss_fn
-        self.padding_value = padding_value
-        if not self.wrapped_loss_fn.per_sample:
-            raise Exception("Lazy methods require the wrapped loss to return sample-wise losses")
-            
-        self.per_sample = per_sample
+    def __init__(self, loss_fn, reduction=None): # the wrapped loss function should handle reduction
+        super().__init__()                         # only here for consistency
+        self.wrapped_loss_fn = loss_fn 
         self.reduction = reduction
         
-    def forward(self, y_hat, y, idx=None):
+    def forward(self, y_hat, y, idx=None, padding_value=-1):
         update = (y_hat.argmax(-1) != y.argmax(-1))
         per_sample_losses = self.wrapped_loss_fn(y_hat, y, idx) * update
-        if self.per_sample:
-            loss = per_sample_losses
-        else:
-            if self.reduction == 'mean':
-                loss = torch.mean(per_sample_losses, dim=0)
-            else:
-                loss = torch.sum(per_sample_losses, dim=0)
+        
+        mask = (idx != padding_value).float()  # get padded items
+
+        loss = per_sample_losses * mask
         return loss
     
-class StatefulLazyLoss(nn.Module):
-    def __init__(self, loss_fn, max_samples, n_networks, reduction='mean', per_sample=True, padding_value=-1):
-        super().__init__()
+class StatefulLazyLoss(nn.Module):     # like lazy, the wrapped loss function should handle reduction
+    def __init__(self, loss_fn, max_samples, n_networks, reduction='mean'):
+        super().__init__()                         
         self.wrapped_loss_fn = loss_fn
-        self.padding_value = padding_value
         self.memory = torch.zeros((max_samples, n_networks), dtype=torch.long)
         self.model_idxs = torch.arange(0, n_networks, dtype=torch.long)
         
-        self.per_sample = per_sample
         self.reduction = reduction
         
-        if not self.wrapped_loss_fn.per_sample:
-            raise Exception("Lazy methods require the wrapped loss to return sample-wise losses")
-        
-    def forward(self, y_hat, y, idx=None):
+    def forward(self, y_hat, y, idx=None, padding_value=-1):
         
         self.memory = self.memory.to(y_hat.device)
         self.model_idxs = self.model_idxs.to(y_hat.device)
         
 
         incorrect = torch.where(
-            (y_hat.argmax(-1) != y.argmax(-1)) & (idx != self.padding_value)
+            (y_hat.argmax(-1) != y.argmax(-1)) & (idx != padding_value)
         )
-        #    Gemini-Pro 2.5 tip
-        #             |
-        #             V
-        self.memory.index_put_(
+
+        self.memory.index_put_( # <- Gemini-Pro 2.5 tip
             (idx[incorrect], incorrect[1]),
             torch.tensor(1, device=y.device),
             accumulate=True
@@ -200,13 +171,10 @@ class StatefulLazyLoss(nn.Module):
         update = self.memory[idx, self.model_idxs] > 0
         per_sample_losses = self.wrapped_loss_fn(y_hat, y, idx) * update
         
-        if self.per_sample:
-            loss = per_sample_losses
-        else:
-            if self.reduction == 'mean':
-                loss = torch.mean(per_sample_losses, dim=0)
-            else:
-                loss = torch.sum(per_sample_losses, dim=0)
+        mask = (idx != padding_value).float()  # get padded items
+
+        loss = per_sample_losses * mask
+
         return loss
         
         

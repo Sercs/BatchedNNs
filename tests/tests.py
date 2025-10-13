@@ -21,6 +21,8 @@ from functools import partial
 import os 
 import sys
 
+import gc
+
 # Get the absolute path of the directory containing the current script
 current_script_path = os.path.dirname(os.path.abspath(__file__))
 
@@ -627,10 +629,10 @@ if __name__ == '__main__':
     #data = []
     #for DEGREES in [1, 1.5, 2, 2.5, 3, 3.5, 4, 4.5]:
     DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-    N_NETWORKS = 20
+    N_NETWORKS = 5
     BATCH_SIZE = 1
     N_IN = 784
-    N_HID = 1000# np.linspace(20, 100, N_NETWORKS, dtype=int)
+    N_HID = 60# np.linspace(20, 100, N_NETWORKS, dtype=int)
     N_OUT = 10
     DEGREES = np.logspace(-1, 1.5, N_NETWORKS-1)
     DEGREES = np.append(2, DEGREES)
@@ -638,7 +640,6 @@ if __name__ == '__main__':
     margins = np.linspace(0.0, 2.0, N_NETWORKS)
     EPOCHS = 0.05
     TEST_EVERY = 0.025#%
-
 
     transform = transforms.Compose([
         transforms.ToTensor(),
@@ -661,7 +662,19 @@ if __name__ == '__main__':
     train = dm.DatasetWithIdx(train_dataset, task='classify')
     test = dm.DatasetWithIdx(test_dataset, task='classify')
     
-    s=samplers.RandomSampler(train, BATCH_SIZE, N_NETWORKS)
+    # TODO: sampler that takes idxs and batches them dynamically
+    s=samplers.RandomSampler(train, 1, N_NETWORKS)
+    # s=samplers.VaryBatchAndDatasetSizeSampler(train, 
+    #                                          N_NETWORKS, 
+    #                                          np.linspace(5_000, 30_000, N_NETWORKS),
+    #                                          np.linspace(1, 16, N_NETWORKS, dtype=int),
+    #                                          padding_value = -1, 
+    #                                          drop_last = True,
+    #                                          order = 'identical', # or 'random'
+    #                                          method = 'loop') # or 'loop' or 'buffer'
+    # test_sampler = samplers.FixedEpochSampler(train,
+    #                                s.get_samples_per_network(),
+    #                                batch_size=32)
     general_collate = samplers.collate_fn(N_NETWORKS)
     
     #samples_used = s.get_samples_per_network()
@@ -669,18 +682,19 @@ if __name__ == '__main__':
     train_dataloader = DataLoader(train,
                                   #batch_size=1)
                               pin_memory=True,
-                              num_workers=0,
+                              num_workers=4,
                               batch_sampler=s,
                               collate_fn=general_collate)
     
     eval_dataloader = DataLoader(train,
-                                 batch_size=16,
+                                 batch_size=32,
                                  num_workers=4,
                                  shuffle=False)
     print(len(train_dataloader))
     test_dataloader = DataLoader(test,
-                              batch_size=16,
                               num_workers=4,
+                              batch_sampler=samplers.RandomSampler(test, 32, N_NETWORKS),
+                              collate_fn=general_collate,
                               shuffle=False)
     
     model = nn.Sequential(trainables.BatchLinear(N_NETWORKS, N_IN, N_HID, 
@@ -689,9 +703,6 @@ if __name__ == '__main__':
                                                         init_config={'a' : -1/np.power(784, 0.5),
                                                                      'b' :1/np.power(784, 0.5)}
                                                         ),
-                          # trainables.BatchDecorrelation(N_NETWORKS, N_HID, 
-                          #                               decor_lr=[1e-4, 1e-5, 1e-6, 1e-7, 1e-8],
-                          #                               mu_lr=np.linspace(0.01, 0.1, 5)),
                           trainables.BatchLinear(N_NETWORKS, N_HID, N_OUT,
                                                         init_method='uniform',
                                                         init_config={'a' : -1/np.power(N_HID, 0.5),
@@ -699,11 +710,7 @@ if __name__ == '__main__':
                                                         ),
                           ).to(DEVICE)
     
-    optimizer = batch_optimizers_temp.Competitive(
-        batch_optimizers_temp.SGD(model.parameters(), lr=0.01, momentum=0.0),
-        k=np.logspace(-4, 0, N_NETWORKS),
-        competition_mode='layer_wise_weight'
-        )
+    optimizer = batch_optimizers_temp.AdamW(model.parameters(), lr=0.0005)
     
     # batch_optimizers_temp.Competitive(
     #     batch_optimizers_temp.SGD(model.parameters(), lr=0.01, momentum=0.0), 
@@ -720,12 +727,21 @@ if __name__ == '__main__':
     #                                    per_sample=True,
     #                                    reduction='mean') # note batch_losses
     
-    criterion1 = batch_losses.MSELoss(per_sample=True, 
-                                      reduction='mean')
+    # criterion1 = batch_losses.MSELoss(reduction='mean')
+    # criterion1 = batch_losses.MAELoss(reduction='mean')
+    # criterion1 = batch_losses.HingeLoss(reduction='mean')
+    criterion1 = batch_losses.CrossEntropyLoss(reduction='mean', confidence_threshold=0.99)
+    # criterion1 = batch_losses.LazyLoss(batch_losses.MSELoss(reduction='mean'),
+    #                                    reduction='mean')
+    # criterion1 = batch_losses.StatefulLazyLoss(batch_losses.CrossEntropyLoss(reduction='mean', 
+    #                                                                          confidence_threshold=0.95),
+    #                                   max_samples=60_000,
+    #                                   n_networks=N_NETWORKS,
+    #                                   reduction='mean')
 
     previous_param_provider = interceptors.PreviousParameterProvider()
     initial_param_provider = interceptors.InitialParameterProvider()
-    prev_prev_param_provider = interceptors.PreviousPreviousParameterProvider(previous_param_provider)
+    #prev_prev_param_provider = interceptors.PreviousPreviousParameterProvider(previous_param_provider)
     
     #(mask1, mask2) = masks.create_subnetwork_mask(N_NETWORKS, [784, 100, 10], [np.linspace(30, 90, N_NETWORKS, dtype=int)])
 #     mask1 = (masks.MaskComposer(n_linears=N_NETWORKS, n_out=N_HID, n_in=N_IN)
@@ -747,14 +763,14 @@ if __name__ == '__main__':
 #     .get_mask(mask_activities=True, mask_gradients=True)
 # )
 
-    mask1 = (masks.MaskComposer(n_linears=N_NETWORKS, n_in=N_IN, n_out=N_HID)
-                    .start_with(
-                        masks.create_local_connectivity_mask, 
-                        image_w=28,
-                        image_h=28,
-                        kernel_sizes=7
-                    )
-                 ).get_mask(mask_activities=False, mask_gradients=True)
+    # mask1 = (masks.MaskComposer(n_linears=N_NETWORKS, n_in=N_IN, n_out=N_HID)
+    #                 .start_with(
+    #                     masks.create_local_connectivity_mask, 
+    #                     image_w=28,
+    #                     image_h=28,
+    #                     kernel_sizes=7
+    #                 )
+    #              ).get_mask(mask_activities=False, mask_gradients=True)
 
     # mask1 = (masks.MaskComposer(n_linears=N_NETWORKS, n_in=N_IN, n_out=N_HID)
     #             .start_with(
@@ -765,31 +781,61 @@ if __name__ == '__main__':
     # mask1 = mc.start_with(masks.create_random_mask(N_NETWORKS, N_IN, N_HID, density=0.062)
     #                       ).union(masks.create_random_neuron_mask, density=0.01).get_config()
     #mask2 = masks.create_random_mask(N_NETWORKS, N_HID, N_OUT)
+    
+    #handler1 = interceptors.ParameterDeltaHandler(2.0, previous_param_provider, mode='cumulative', granularity='network', components=['total', 'weight', 'bias'])
+    #handler2 = interceptors.ParameterDeltaHandler(2.0, previous_param_provider, mode='cumulative', granularity='layerwise', components=['total', 'weight', 'bias'])
+    #handler3 = interceptors.ParameterDeltaHandler(2.0, initial_param_provider, mode='displacement', granularity='network', components=['total', 'weight', 'bias'])
+    #handler4 = interceptors.ParameterDeltaHandler(2.0, initial_param_provider, mode='displacement', granularity='layerwise', components=['total', 'weight', 'bias'])
+    #handler5 = interceptors.ParameterDeltaHandler(1.0, previous_param_provider, mode='cumulative', granularity='network', components=['total', 'weight', 'bias'])
+    #handler6 = interceptors.ParameterDeltaHandler(2.5, initial_param_provider, mode='displacement', granularity='layerwise')
+
+    #param_iterator = interceptors.ParameterIterator(handlers=[handler1, handler2])
+    
+    mask1 = masks.create_vary_width_masks(N_NETWORKS, N_IN, np.arange(10, 310, N_NETWORKS))
+    mask2 = masks.create_vary_width_masks(N_NETWORKS, np.arange(10, 310, N_NETWORKS), N_OUT)
 
     trackers = [interceptors.Timer(),
                 #interceptors.MaskLinear(model[0], mask1),
                 #interceptors.MaskLinear(model[1], mask2),
-                interceptors.TestingLossTracker({'test': ['MSELoss']}),
-                interceptors.TestingAccuracyTracker(['test']),
+                #interceptors.TestingLossTracker({'test': ['MSELoss']}),
+                #interceptors.TestingAccuracyTracker(['test']),
+                interceptors.EpochCounter(60_000),
                 previous_param_provider,
                 initial_param_provider,
+                # interceptors.ParameterDeltaTracker(0.5, previous_param_provider, mode='cumulative', granularity='network', components=['total', 'weight', 'bias']),
+                # interceptors.ParameterDeltaTracker(0.75, initial_param_provider, mode='displacement', granularity='layerwise'),
+                # interceptors.ParameterDeltaTracker(1.0, previous_param_provider, mode='cumulative', granularity='network', components=['total', 'weight', 'bias']),
+                # interceptors.ParameterDeltaTracker(1.5, initial_param_provider, mode='displacement', granularity='layerwise'),
+                interceptors.EnergyMetircTracker(1.0, previous_param_provider, mode='energy', granularity='network', components=['total', 'weight', 'bias']),
+                interceptors.EnergyMetircTracker(1.0, previous_param_provider, mode='energy', granularity='layerwise', components=['total', 'weight', 'bias']),
+                interceptors.EnergyMetircTracker(1.0, previous_param_provider, mode='energy', granularity='neuronwise', components=['weight', 'bias'], energy_direction=['outgoing', 'incoming']),
+                interceptors.EnergyMetircTracker(1.0, initial_param_provider, mode='minimum_energy', granularity='network', components=['total', 'weight', 'bias']),
+                interceptors.EnergyMetircTracker(1.0, initial_param_provider, mode='minimum_energy', granularity='layerwise', components=['total', 'weight', 'bias']),
+                interceptors.EnergyMetircTracker(1.0, initial_param_provider, mode='minimum_energy', granularity='neuronwise', components=['weight', 'bias'], energy_direction=['outgoing', 'incoming']),
                 interceptors.TestLoop('test', 
                                    test_dataloader, 
-                                   criterions={'MSELoss' : batch_losses.MSELoss(per_sample=False, 
-                                                                                reduction='sum')}),
+                                   criterions={'MSELoss' : batch_losses.CrossEntropyLoss(reduction='mean')},
+                                   track_accuracy=True),
+                interceptors.TestLoop('train', 
+                                   eval_dataloader, 
+                                   criterions={'MSELoss' : batch_losses.CrossEntropyLoss(reduction='mean')},
+                                   track_accuracy=True),
                 interceptors.BackwardPassCounter(),
-                interceptors.EnergyL1NetworkTracker(previous_param_provider),
-                interceptors.EnergyL1LayerwiseTracker(previous_param_provider),
-                interceptors.EnergyL0NetworkTracker(previous_param_provider),
-                interceptors.MinimumEnergyL0NetworkTracker(initial_param_provider),
+                interceptors.PerSampleBackwardCounter(60_000),
+                #interceptors.MistakeReplay(train, optimizer, replay_frequency=200, n_replays=np.linspace(0, 10, N_NETWORKS, dtype=int), batch_size=32),
+                #interceptors.EnergyL1NetworkTracker(previous_param_provider),
+                #interceptors.MinimumEnergyL1NetworkTracker(initial_param_provider),
+                #interceptors.EnergyL1LayerwiseTracker(previous_param_provider),
+                #interceptors.EnergyL0NetworkTracker(previous_param_provider),
+                #interceptors.MinimumEnergyL0NetworkTracker(initial_param_provider),
                 interceptors.ResultPrinter({'time_taken' : True, 
-                                            'test_accuracies' : ['test'], 
-                                            'energies_l1' : True, 
-                                            'minimum_energies_l0' : True,
-                                            'energies_l0' : True})]
-                #interceptors.ParameterIterator(handlers)]
+                                            'test_accuracies' : ['test'],
+                                            'test_losses' : ['MSELoss'],
+                                            'energies_l1.0_network' : ['total'],
+                                            'energies_l1.0_neuronwise' : ['total'],
+                                            'func' : {'mean' : np.mean}})]
     
-    s=time.time()
+    start=time.time()
     
     #print(list(model.parameters()))
     
@@ -801,10 +847,12 @@ if __name__ == '__main__':
                                test_dataloader, 
                                trackers=trackers, 
                                device=DEVICE)
-    #trainer.train_loop(0.1, 0.01, sample_increment=1)
+    trainer.train_loop(0.02, 0.01, sample_increment=1)
     
     d1=utils.convert_data(trainer.state['data'])
-    print(str(np.mean(d1['test_accuracies']['test'][-1]))+' +'+str(np.mean(d1['test_accuracies']['test'][-1])+np.std(d1['test_accuracies']['test'][-1]))+' -'+str(np.mean(d1['test_accuracies']['test'][-1])-np.std(d1['test_accuracies']['test'][-1])))
+    utils.print_data_structure(d1, 'd1')
+    trainer.cleanup()
+    
     
     # model = nn.Sequential(trainables.BatchLinear(N_NETWORKS, N_IN, N_HID, 
     #                                                     activation=nn.GELU(),

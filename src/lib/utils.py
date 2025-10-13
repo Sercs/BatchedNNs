@@ -38,6 +38,33 @@ def print_state_data_structure(state, level=0):
         else:
             # If it's a leaf node, print the key and type with the current indentation.
             print(f"{indent}{key}: {type(value).__name__}")
+            
+def print_data_structure(data_dict, dict_name='data'):
+    """
+    Recursively prints the structure of a nested dictionary, showing the
+    full access path and data shape for leaf nodes.
+    """
+    def _recursive_print(d, level=0, path=''):
+        indent = '  ' * level
+        for key, value in d.items():
+            new_path = f"{path}['{key}']"
+            if isinstance(value, dict):
+                print(f"{indent}{key}:")
+                if not value:
+                    print(f"{indent}    (empty dict)")
+                else:
+                    _recursive_print(value, level + 1, new_path)
+            else:
+                # Leaf node: print key, type, shape, and full access path
+                leaf_info = f"{type(value).__name__}"
+                if isinstance(value, np.ndarray) and len(value) > 0:
+                    leaf_shape = f"{value.shape}"
+                
+                print(f"{indent}{key}: {leaf_info}|{leaf_shape} -> {dict_name}{new_path}")
+    
+    print(f"\n" + "-"*20 + f" Data Structure: {dict_name} " + "-"*20)
+    _recursive_print(data_dict)
+    print("-" * (42 + len(dict_name)))
 
 # Gemini-Flash 2.5
 def moving_mean(data: np.ndarray, window_size, axis = -1):

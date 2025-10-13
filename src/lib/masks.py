@@ -438,3 +438,16 @@ def create_subnetwork_mask(
         }
 
     return tuple(all_configs)
+
+def all_on(n_linears, n_out, n_in, device='cpu', **kwargs):
+    """Creates a fully connected mask of all ones."""
+    weight_mask = torch.ones((n_linears, n_out, n_in), device=device)
+    # The bias mask is also set to ones, but will be overridden by get_config
+    bias_mask = torch.ones((n_linears, n_out), device=device)
+    return {'weight_mask': weight_mask, 'bias_mask': bias_mask}
+
+def all_off(n_linears, n_out, n_in, device='cpu', **kwargs):
+    """Creates a fully disconnected mask of all zeros."""
+    weight_mask = torch.zeros((n_linears, n_out, n_in), device=device)
+    bias_mask = torch.zeros((n_linears, n_out), device=device)
+    return {'weight_mask': weight_mask, 'bias_mask': bias_mask}

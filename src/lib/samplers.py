@@ -356,7 +356,6 @@ class VaryBatchAndDatasetSizeSampler(Sampler):
             ]
             shuffled_indices = torch.stack(padded_streams) if padded_streams else torch.empty((self.n_streams, 0), dtype=torch.long)
 
-
         if self.method == 'stretch':
             num_batches_per_network = self._get_num_batches()
             max_batches = len(self)
@@ -428,4 +427,82 @@ class VaryBatchAndDatasetSizeSampler(Sampler):
 
             positions += self.batch_sizes
             
+            yield step_batch.T.flatten().tolist()
+
+class FixedEpochSampler(Sampler):
+    """
+    A PyTorch Sampler designed specifically for evaluation loops on batched networks
+    where each network "views" a differently sized dataset and thus requires masking
+    samples for networks who "view" a smaller dataset. This sampler guarantees a 
+    1 epoch over mixed datasets.
+
+    This sampler takes a pre-defined list of sample indices for each network stream
+    and generates batches using a fixed batch size. It handles uneven dataset
+    sizes by padding streams that finish early, ensuring all networks are processed
+    for the same number of steps. This is ideal for use with a TestLoop interceptor.
+
+    Args:
+        data_source (Dataset): The dataset to sample from (required by Sampler).
+        indices_per_network (list[torch.Tensor]): A list where each element is a
+            tensor of sample indices for one network stream.
+        batch_size (int): The fixed batch size to use for all networks.
+        padding_value (int, optional): The value to use for padding. Defaults to -1.
+    """
+    def __init__(self, data_source, indices_per_network, batch_size, padding_value=-1):
+        super().__init__()
+        
+        if not isinstance(indices_per_network, list):
+            raise TypeError("indices_per_network must be a list of tensors.")
+        if not isinstance(batch_size, int) or batch_size <= 0:
+            raise ValueError("batch_size must be a positive integer.")
+
+        self.data_source = data_source
+        
+        if isinstance(indices_per_network, np.ndarray):
+            indices_per_network = [torch.tensor(n) for n in indices_per_network]
+        self.indices_per_network = indices_per_network
+        self.batch_size = batch_size
+        self.padding_value = padding_value
+        
+        self.n_streams = len(self.indices_per_network)
+        self.dataset_sizes = torch.tensor([len(indices) for indices in self.indices_per_network])
+        
+        # Calculate the number of batches needed for the longest stream
+        num_batches_per_network = torch.ceil(self.dataset_sizes.float() / self.batch_size).long()
+        self._len = num_batches_per_network.max().item() if self.n_streams > 0 else 0
+
+    def __len__(self) -> int:
+        """The number of batches is determined by the longest-running network."""
+        return self._len
+
+    def __iter__(self):
+        """
+        Yields batches of indices. Each batch is a flattened list of indices
+        of size (batch_size * n_streams), structured as if it came from a
+        (batch_size, n_streams) tensor.
+        """
+        # Pointers to track the current position in each network's index list
+        positions = torch.zeros(self.n_streams, dtype=torch.long)
+
+        for _ in range(self._len):
+            # Create a placeholder for the batch for all streams
+            # Shape: (n_streams, batch_size)
+            step_batch = torch.full((self.n_streams, self.batch_size), self.padding_value, dtype=torch.long)
+            
+            for i in range(self.n_streams):
+                start = positions[i].item()
+                end = start + self.batch_size
+                
+                # Get the slice of indices for the current network
+                # Clamp the end to avoid going out of bounds
+                indices_slice = self.indices_per_network[i][start:end]
+                if len(indices_slice) > 0:
+                    step_batch[i, :len(indices_slice)] = indices_slice
+
+            # Update positions for the next iteration
+            positions += self.batch_size
+            
+            # The DataLoader expects a flattened list of indices for one batch.
+            # We transpose to group by sample index across networks, then flatten.
+            # Shape (batch_size, n_streams) -> flattened list
             yield step_batch.T.flatten().tolist()
