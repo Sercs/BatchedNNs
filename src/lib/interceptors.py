@@ -1,6 +1,8 @@
 # TODO: sleep epochs
 # TODO: Generalize energy measures, better calculated metrics
 # TODO [minor]: weight masking, providers as handlers, std
+
+from .trainables import BatchLinear
 import torch
 import torch.nn as nn
 import numpy as np
@@ -430,7 +432,14 @@ class MaskLinear(Interceptor):
     """
     def __init__(self, layer, mask_config):
         super().__init__()
-        # TODO: better type check (i think i need to mess with envs)
+        
+        # --- Mandatory Type Check ---
+        if not isinstance(layer, BatchLinear):
+            raise TypeError(
+                f"MaskLinear received an invalid module type: "
+                f"Expected 'BatchLinear', got '{type(layer).__name__}'. "
+                "This interceptor only supports BatchLinear modules."
+            )
         self.layer = layer
         
         self.layer.register_buffer('weight_mask', mask_config['weight_mask'].to(layer.weights.device))
@@ -587,8 +596,8 @@ class L2Regularizer(Interceptor):
 
 # TODO: in theory replay could be applied to any stat
 # TODO: this might require different logic to handle replay only events
-from lib.samplers import FixedEpochSampler as FixedEpochSampler
-from lib.samplers import collate_fn as collate_fn
+from .samplers import FixedEpochSampler as FixedEpochSampler
+from .samplers import collate_fn as collate_fn
 from torch.utils.data import DataLoader
 class MistakeReplay(Interceptor):
     def __init__(self, data_source, optimizer, replay_frequency, n_replays, batch_size, num_workers=0):
