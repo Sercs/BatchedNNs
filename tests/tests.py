@@ -694,7 +694,7 @@ if __name__ == '__main__':
     print(len(train_dataloader))
     test_dataloader = DataLoader(test,
                               num_workers=4,
-                              batch_size=64,
+                              batch_size=2048,
                               shuffle=False)
     
     model = nn.Sequential(trainables.BatchLinear(N_NETWORKS, N_IN, N_HID, 
