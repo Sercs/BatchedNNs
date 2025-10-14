@@ -52,10 +52,11 @@ class Trainer():
         
         # >>> Initialization <<<
         if dataset_size is None:
-            n_samples = len(self.train_dataloader)
+            n_samples = len(self.train_dataloader.dataset)
         else:
             n_samples = dataset_size
-        batch_size = self.train_dataloader.batch_size
+
+        n_batches = len(self.train_dataloader)
         
         if type(test_interval) is float:
             test_interval = int(test_interval * n_samples)
@@ -63,26 +64,24 @@ class Trainer():
         # good for quick tests (i.e. n_epochs = 0.01) 
         if type(n_epochs) is float:
             stop_on_sample = int(n_epochs * n_samples)
-            n_epochs = int(np.ceil((n_epochs)))
         else:
-            stop_on_sample = -1 # epochs is whole number, therefore no need to stop mid-epoch
+            stop_on_sample = n_epochs # n_epochs is whole number, therefore no need to stop mid-epoch
 
         test_epoch = 0
         sample_counter = 0
-        if sample_increment is None:
-            test_step = batch_size
-        else:
-            test_step = sample_increment
-        
+
         # >>> Main loop <<<
         self._fire_event('before_train')
-        for epoch in range(n_epochs):
+        for epoch in range(int(np.ceil((n_epochs)))):
             print(f"Epoch: {epoch+1}")
             self.state['epoch'] = epoch+1
             self._fire_event('before_epoch')
             for (x, y, idx) in self.train_dataloader:
                 batch_size = x.size(0) # handles varying batch_size
-                
+                if sample_increment is None:
+                    test_step = batch_size
+                else:
+                    test_step = sample_increment
                 # if network A views 1 sample and network B views 32 samples
                 # who should we use as a reference for testing?
                 # if we test 5% of an epoch, network B operates 32x faster.
@@ -100,26 +99,12 @@ class Trainer():
                 self._fire_event('after_update')
                 if test_epoch >= test_interval: # TODO: it may be possible to avoid this check and instead 
                                                 #       have interceptors that need it look for a state['count']
-                    print("Forward passes since last test:", test_epoch)            
+                    print(f"[{sample_counter / stop_on_sample*100}%] > Forward passes: {self.state['step']} | Samples seen: {sample_counter}")            
                     self._fire_event('before_test') # initialization stuff usually
                     self._fire_event('on_test_run') # used primarily by the test loop 
                     self._fire_event('after_test')  # typically for recording metrics
-                    
-                    # quick prints for stats
-                    # TODO: probably could make an interceptor print all the data we want [Done!]
-                    #print(self.state['data']['time_taken'][-1])
-                    #print(self.state['data']['test_accuracies']['test'][-1])
-                    # print(self.state['data']['energies_l1_layerwise'])
-                    # print(self.state['data']['minimum_energies_l1_layerwise'])
-                    #print(self.state['data']['energies_l1'][-1])
-                    #print(self.state['data']['minimum_energies_l1'][-1])
-                    # print(self.state['data']['energies_l2'][-1])
-                    # print(self.state['data']['minimum_energies_l2'][-1])
-                    #print(self.state['data']['energies_l0'][-1])
-                    #print(self.state['data']['minimum_energies_l0'][-1])
                     test_epoch = 0
-                    
-                if stop_on_sample > 0 and sample_counter > stop_on_sample:
+                if n_epochs % 1.0 != 0 and sample_counter > stop_on_sample:
                     self._fire_event('after_train') # mid epoch stop
                     return
                 self.state['step'] += 1
