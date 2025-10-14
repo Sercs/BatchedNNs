@@ -645,15 +645,15 @@ if __name__ == '__main__':
         transforms.ToTensor(),
         transforms.Normalize((0.1307,), (0.3081,))
     ])
-    train_dataset = datasets.MNIST(root='datasets',
-                             #split='digits', # used as a quick swap for EMNIST
+    train_dataset = datasets.EMNIST(root='datasets',
+                                split='digits', # used as a quick swap for EMNIST
                                 train=True,
                                 download=True,
                                 transform=transform, # automatically coverts 0 - 255 --> 0 - 1
                                 target_transform=dm.temp_onehot)
     
-    test_dataset = datasets.MNIST(root='datasets',
-                             #split='digits', # used as a quick swap for EMNIST
+    test_dataset = datasets.EMNIST(root='datasets',
+                                split='digits', # used as a quick swap for EMNIST
                                 train=False,
                                 download=True,
                                 transform=transform, # automatically coverts 0 - 255 --> 0 - 1
@@ -663,8 +663,8 @@ if __name__ == '__main__':
     test = dm.DatasetWithIdx(test_dataset, task='classify')
     
     # TODO: sampler that takes idxs and batches them dynamically
-    bpcounter = interceptors.PerSampleBackwardCounter(60_000)
-    s=samplers.HardMiningSampler(train, N_NETWORKS, bpcounter, 10, 3)
+    bpcounter = interceptors.PerSampleBackwardCounter(240_000)
+    s=samplers.RandomSampler(train, N_NETWORKS, 1)
     # s=samplers.VaryBatchAndDatasetSizeSampler(train, 
     #                                          N_NETWORKS, 
     #                                          np.linspace(5_000, 30_000, N_NETWORKS),
@@ -683,19 +683,18 @@ if __name__ == '__main__':
     train_dataloader = DataLoader(train,
                                   #batch_size=1)
                               pin_memory=True,
-                              num_workers=1,
+                              num_workers=4,
                               batch_sampler=s,
                               collate_fn=general_collate)
     
     eval_dataloader = DataLoader(train,
-                                 batch_size=32,
+                                 batch_size=64,
                                  num_workers=4,
                                  shuffle=False)
     print(len(train_dataloader))
     test_dataloader = DataLoader(test,
                               num_workers=4,
-                              batch_sampler=samplers.RandomSampler(test, 32, N_NETWORKS),
-                              collate_fn=general_collate,
+                              batch_size=64,
                               shuffle=False)
     
     model = nn.Sequential(trainables.BatchLinear(N_NETWORKS, N_IN, N_HID, 
@@ -728,16 +727,16 @@ if __name__ == '__main__':
     #                                    per_sample=True,
     #                                    reduction='mean') # note batch_losses
     
-    # criterion1 = batch_losses.MSELoss(reduction='mean')
+    criterion1 = batch_losses.MSELoss(reduction='mean')
     # criterion1 = batch_losses.MAELoss(reduction='mean')
     # criterion1 = batch_losses.HingeLoss(reduction='mean')
     #criterion1 = batch_losses.CrossEntropyLoss(reduction='mean')
     # criterion1 = batch_losses.LazyLoss(batch_losses.MSELoss(reduction='mean'),
     #                                    reduction='mean')
-    criterion1 = batch_losses.StatefulLazyLoss(batch_losses.CrossEntropyLoss(reduction='mean'),
-                                      max_samples=60_000,
-                                      n_networks=N_NETWORKS,
-                                      reduction='mean')
+    # criterion1 = batch_losses.StatefulLazyLoss(batch_losses.CrossEntropyLoss(reduction='mean'),
+    #                                   max_samples=60_000,
+    #                                   n_networks=N_NETWORKS,
+    #                                   reduction='mean')
 
     previous_param_provider = interceptors.PreviousParameterProvider()
     initial_param_provider = interceptors.InitialParameterProvider()
@@ -798,7 +797,7 @@ if __name__ == '__main__':
                 #interceptors.MaskLinear(model[1], mask2),
                 #interceptors.TestingLossTracker({'test': ['MSELoss']}),
                 #interceptors.TestingAccuracyTracker(['test']),
-                interceptors.EpochCounter(60_000),
+                interceptors.EpochCounter(240_000),
                 previous_param_provider,
                 initial_param_provider,
                 # interceptors.ParameterDeltaTracker(0.5, previous_param_provider, mode='cumulative', granularity='network', components=['total', 'weight', 'bias']),
@@ -813,18 +812,12 @@ if __name__ == '__main__':
                 interceptors.EnergyMetricTracker(1.0, initial_param_provider, mode='minimum_energy', granularity='neuronwise', components=['weight', 'bias'], energy_direction=['outgoing', 'incoming']),
                 interceptors.TestLoop('test', 
                                    test_dataloader, 
-                                   criterions={'MSELoss' : batch_losses.StatefulLazyLoss(batch_losses.CrossEntropyLoss(reduction='mean'),
-                                                                     max_samples=60_000,
-                                                                     n_networks=N_NETWORKS,
-                                                                     reduction='mean')},
+                                   criterions={'MSELoss' : criterion1},
                                    track_accuracy=True),
-                interceptors.TestLoop('train', 
-                                   eval_dataloader, 
-                                   criterions={'MSELoss' : batch_losses.StatefulLazyLoss(batch_losses.CrossEntropyLoss(reduction='mean'),
-                                                                     max_samples=60_000,
-                                                                     n_networks=N_NETWORKS,
-                                                                     reduction='mean')},
-                                   track_accuracy=True),
+                # interceptors.TestLoop('train', 
+                #                    eval_dataloader, 
+                #                    criterions={'MSELoss' : criterion1},
+                #                    track_accuracy=True),
                 interceptors.BackwardPassCounter(),
                 bpcounter,
                 #interceptors.MistakeReplay(train, optimizer, replay_frequency=200, n_replays=np.linspace(0, 10, N_NETWORKS, dtype=int), batch_size=32),
@@ -852,7 +845,7 @@ if __name__ == '__main__':
                                test_dataloader, 
                                trackers=trackers, 
                                device=DEVICE)
-    trainer.train_loop(1.5, 0.01)
+    trainer.train_loop(0.1, 0.1)
     
     d3=utils.convert_data(trainer.state['data'])
     utils.print_data_structure(d3, 'd3')

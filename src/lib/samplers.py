@@ -38,10 +38,10 @@ class IdenticalSampler(Sampler):
     A PyTorch Sampler used to explicitly copy items in a batch such that all
     networks view exactly the same items at exactly the same time.
     """
-    def __init__(self, data_source, batch_size, n_streams, drop_last=False):
+    def __init__(self, data_source, n_streams, batch_size, drop_last=False):
         self.data_source = data_source
-        self.batch_size = batch_size
         self.n_streams = n_streams
+        self.batch_size = batch_size
         self.drop_last = drop_last
 
     def __iter__(self):
@@ -67,10 +67,10 @@ class RandomSampler(Sampler):
     A PyTorch Sampler used to explicitly randomize items in a batch such that all
     networks view different items at the same time.
     """
-    def __init__(self, data_source, batch_size, n_streams, drop_last=False):
+    def __init__(self, data_source, n_streams, batch_size, drop_last=False):
         self.data_source = data_source
-        self.batch_size = batch_size
         self.n_streams = n_streams
+        self.batch_size = batch_size
         self.num_samples = len(self.data_source)
         self.drop_last = drop_last
 
@@ -444,6 +444,7 @@ class FixedEpochSampler(Sampler):
         data_source (Dataset): The dataset to sample from (required by Sampler).
         indices_per_network (list[torch.Tensor]): A list where each element is a
             tensor of sample indices for one network stream.
+            Intended use with VaryBatchAndDatasetSizeSampler(...).get_samples_per_network().
         batch_size (int): The fixed batch size to use for all networks.
         padding_value (int, optional): The value to use for padding. Defaults to -1.
     """
