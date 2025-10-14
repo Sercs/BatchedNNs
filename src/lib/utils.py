@@ -59,6 +59,8 @@ def print_data_structure(data_dict, dict_name='data'):
                 leaf_info = f"{type(value).__name__}"
                 if isinstance(value, np.ndarray) and len(value) > 0:
                     leaf_shape = f"{value.shape}"
+                else:
+                    leaf_shape = 0
                 
                 print(f"{indent}{key}: {leaf_info}|{leaf_shape} -> {dict_name}{new_path}")
     
