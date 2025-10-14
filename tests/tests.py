@@ -729,7 +729,7 @@ if __name__ == '__main__':
     
     #criterion1 = batch_losses.MSELoss(reduction='mean')
     # criterion1 = batch_losses.MAELoss(reduction='mean')
-    criterion1 = batch_losses.HingeLoss(reduction='mean')
+    criterion1 = batch_losses.HingeLoss(margin=0.10)
     #criterion1 = batch_losses.CrossEntropyLoss(reduction='mean')
     #criterion = batch_losses.LazyLoss(batch_losses.MSELoss(reduction='mean'),
     #                                   reduction='mean')

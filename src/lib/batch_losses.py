@@ -77,7 +77,10 @@ class HingeLoss(nn.Module): # conventionally Hinge is reduced by sum
         self.reduction = reduction
         self.func = func
         
-        self.margin = torch.tensor(margin).unsqueeze(0).unsqueeze(-1)
+        if isinstance(margin, torch.Tensor) and len(margin.shape) == 0:
+            self.margin = margin.unsqueeze(0).unsqueeze(-1)
+        else:
+            self.margin = torch.tensor(margin).unsqueeze(0).unsqueeze(-1)
 
     def forward(self, y_hat, y, idx=None, padding_value=-1):
         self.margin = self.margin.to(y_hat.device)
