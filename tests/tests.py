@@ -1,7 +1,7 @@
 from lib import trainables, trainers, interceptors, batch_losses, batch_optimizers, samplers, utils, masks
 from lib import data_manager as dm
 
-from lib import batch_optimizers_temp 
+from lib import batch_optimizers 
 
 import time
 import torch
@@ -710,7 +710,7 @@ if __name__ == '__main__':
                                                         ),
                           ).to(DEVICE)
 
-    optimizer = batch_optimizers_temp.AdamW(model.parameters(), lr=0.0005)
+    optimizer = batch_optimizers.AdamW(model.parameters(), lr=0.0005)
     
     # batch_optimizers_temp.Competitive(
     #     batch_optimizers_temp.SGD(model.parameters(), lr=0.01, momentum=0.0), 
@@ -731,8 +731,8 @@ if __name__ == '__main__':
     # criterion1 = batch_losses.MAELoss(reduction='mean')
     # criterion1 = batch_losses.HingeLoss(reduction='mean')
     #criterion1 = batch_losses.CrossEntropyLoss(reduction='mean')
-    # criterion1 = batch_losses.LazyLoss(batch_losses.MSELoss(reduction='mean'),
-    #                                    reduction='mean')
+    criterion = batch_losses.LazyLoss(batch_losses.MSELoss(reduction='mean'),
+                                       reduction='mean')
     # criterion1 = batch_losses.StatefulLazyLoss(batch_losses.CrossEntropyLoss(reduction='mean'),
     #                                   max_samples=60_000,
     #                                   n_networks=N_NETWORKS,
@@ -827,7 +827,7 @@ if __name__ == '__main__':
                 #interceptors.EnergyL0NetworkTracker(previous_param_provider),
                 #interceptors.MinimumEnergyL0NetworkTracker(initial_param_provider),
                 interceptors.ResultPrinter({'time_taken' : True, 
-                                            'test_accuracies' : ['test'],
+                                            'test_accuracies' : True,
                                             'test_losses' : ['MSELoss'],
                                             'energies_l1.0_network' : ['total'],
                                             'energies_l1.0_neuronwise' : ['total'],
