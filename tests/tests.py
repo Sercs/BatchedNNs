@@ -709,7 +709,7 @@ if __name__ == '__main__':
                                                                      'b' : 1/np.power(N_HID, 0.5)}
                                                         ),
                           ).to(DEVICE)
-    
+
     optimizer = batch_optimizers_temp.AdamW(model.parameters(), lr=0.0005)
     
     # batch_optimizers_temp.Competitive(
@@ -845,7 +845,7 @@ if __name__ == '__main__':
                                test_dataloader, 
                                trackers=trackers, 
                                device=DEVICE)
-    trainer.train_loop(0.1, 0.1)
+    trainer.train_loop(0.001, 0.001)
     
     d3=utils.convert_data(trainer.state['data'])
     utils.print_data_structure(d3, 'd3')

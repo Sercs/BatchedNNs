@@ -1,8 +1,6 @@
 # TODO: sleep epochs
 # TODO: Generalize energy measures, better calculated metrics
 # TODO [minor]: weight masking, providers as handlers, std
-
-from lib.trainables import BatchLinear
 import torch
 import torch.nn as nn
 import numpy as np
@@ -432,14 +430,7 @@ class MaskLinear(Interceptor):
     """
     def __init__(self, layer, mask_config):
         super().__init__()
-        
-        # --- Mandatory Type Check ---
-        if not isinstance(layer, BatchLinear):
-            raise TypeError(
-                f"MaskLinear received an invalid module type: "
-                f"Expected 'BatchLinear', got '{type(layer).__name__}'. "
-                "This interceptor only supports BatchLinear modules."
-            )
+        # TODO: better type check (i think i need to mess with envs)
         self.layer = layer
         
         self.layer.register_buffer('weight_mask', mask_config['weight_mask'].to(layer.weights.device))
