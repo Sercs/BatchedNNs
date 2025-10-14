@@ -57,6 +57,7 @@ def print_data_structure(data_dict, dict_name='data'):
             else:
                 # Leaf node: print key, type, shape, and full access path
                 leaf_info = f"{type(value).__name__}"
+                leaf_shape = 0
                 if isinstance(value, np.ndarray) and len(value) > 0:
                     leaf_shape = f"{value.shape}"
                 else:
