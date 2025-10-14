@@ -82,6 +82,7 @@ class SGD(torch.optim.Optimizer):
                     grad_update = buf
 
                 p.addcmul_(grad_update, lr, value=-1)
+                
 class AdamW(torch.optim.Optimizer):
     """
     Implements a from-scratch AdamW optimizer.

@@ -419,6 +419,9 @@ class PerSampleBackwardCounter(Interceptor):
     def after_train(self, state):
         state['data']['per_sample_backward_counts'] = self.per_sample_backward_counts.clone().numpy()
 
+    def get_hard_indices(self, i):
+        return np.where(self.per_sample_backward_counts.T[i] > 0)[0].tolist()
+
 ########################## NETWORK LOGIC MODIFICAITON ##########################
 class MaskLinear(Interceptor):
     """

@@ -663,7 +663,8 @@ if __name__ == '__main__':
     test = dm.DatasetWithIdx(test_dataset, task='classify')
     
     # TODO: sampler that takes idxs and batches them dynamically
-    s=samplers.RandomSampler(train, 1, N_NETWORKS)
+    bpcounter = interceptors.PerSampleBackwardCounter(60_000)
+    s=samplers.HardMiningSampler(train, N_NETWORKS, bpcounter, 10, 3)
     # s=samplers.VaryBatchAndDatasetSizeSampler(train, 
     #                                          N_NETWORKS, 
     #                                          np.linspace(5_000, 30_000, N_NETWORKS),
@@ -682,7 +683,7 @@ if __name__ == '__main__':
     train_dataloader = DataLoader(train,
                                   #batch_size=1)
                               pin_memory=True,
-                              num_workers=4,
+                              num_workers=1,
                               batch_sampler=s,
                               collate_fn=general_collate)
     
@@ -730,14 +731,13 @@ if __name__ == '__main__':
     # criterion1 = batch_losses.MSELoss(reduction='mean')
     # criterion1 = batch_losses.MAELoss(reduction='mean')
     # criterion1 = batch_losses.HingeLoss(reduction='mean')
-    criterion1 = batch_losses.CrossEntropyLoss(reduction='mean', confidence_threshold=0.99)
+    #criterion1 = batch_losses.CrossEntropyLoss(reduction='mean')
     # criterion1 = batch_losses.LazyLoss(batch_losses.MSELoss(reduction='mean'),
     #                                    reduction='mean')
-    # criterion1 = batch_losses.StatefulLazyLoss(batch_losses.CrossEntropyLoss(reduction='mean', 
-    #                                                                          confidence_threshold=0.95),
-    #                                   max_samples=60_000,
-    #                                   n_networks=N_NETWORKS,
-    #                                   reduction='mean')
+    criterion1 = batch_losses.StatefulLazyLoss(batch_losses.CrossEntropyLoss(reduction='mean'),
+                                      max_samples=60_000,
+                                      n_networks=N_NETWORKS,
+                                      reduction='mean')
 
     previous_param_provider = interceptors.PreviousParameterProvider()
     initial_param_provider = interceptors.InitialParameterProvider()
@@ -793,7 +793,6 @@ if __name__ == '__main__':
     
     mask1 = masks.create_vary_width_masks(N_NETWORKS, N_IN, np.arange(10, 310, N_NETWORKS))
     mask2 = masks.create_vary_width_masks(N_NETWORKS, np.arange(10, 310, N_NETWORKS), N_OUT)
-
     trackers = [interceptors.Timer(),
                 #interceptors.MaskLinear(model[0], mask1),
                 #interceptors.MaskLinear(model[1], mask2),
@@ -806,22 +805,28 @@ if __name__ == '__main__':
                 # interceptors.ParameterDeltaTracker(0.75, initial_param_provider, mode='displacement', granularity='layerwise'),
                 # interceptors.ParameterDeltaTracker(1.0, previous_param_provider, mode='cumulative', granularity='network', components=['total', 'weight', 'bias']),
                 # interceptors.ParameterDeltaTracker(1.5, initial_param_provider, mode='displacement', granularity='layerwise'),
-                interceptors.EnergyMetircTracker(1.0, previous_param_provider, mode='energy', granularity='network', components=['total', 'weight', 'bias']),
-                interceptors.EnergyMetircTracker(1.0, previous_param_provider, mode='energy', granularity='layerwise', components=['total', 'weight', 'bias']),
-                interceptors.EnergyMetircTracker(1.0, previous_param_provider, mode='energy', granularity='neuronwise', components=['weight', 'bias'], energy_direction=['outgoing', 'incoming']),
-                interceptors.EnergyMetircTracker(1.0, initial_param_provider, mode='minimum_energy', granularity='network', components=['total', 'weight', 'bias']),
-                interceptors.EnergyMetircTracker(1.0, initial_param_provider, mode='minimum_energy', granularity='layerwise', components=['total', 'weight', 'bias']),
-                interceptors.EnergyMetircTracker(1.0, initial_param_provider, mode='minimum_energy', granularity='neuronwise', components=['weight', 'bias'], energy_direction=['outgoing', 'incoming']),
+                interceptors.EnergyMetricTracker(1.0, previous_param_provider, mode='energy', granularity='network', components=['total', 'weight', 'bias']),
+                interceptors.EnergyMetricTracker(1.0, previous_param_provider, mode='energy', granularity='layerwise', components=['total', 'weight', 'bias']),
+                interceptors.EnergyMetricTracker(1.0, previous_param_provider, mode='energy', granularity='neuronwise', components=['weight', 'bias'], energy_direction=['outgoing', 'incoming']),
+                interceptors.EnergyMetricTracker(1.0, initial_param_provider, mode='minimum_energy', granularity='network', components=['total', 'weight', 'bias']),
+                interceptors.EnergyMetricTracker(1.0, initial_param_provider, mode='minimum_energy', granularity='layerwise', components=['total', 'weight', 'bias']),
+                interceptors.EnergyMetricTracker(1.0, initial_param_provider, mode='minimum_energy', granularity='neuronwise', components=['weight', 'bias'], energy_direction=['outgoing', 'incoming']),
                 interceptors.TestLoop('test', 
                                    test_dataloader, 
-                                   criterions={'MSELoss' : batch_losses.CrossEntropyLoss(reduction='mean')},
+                                   criterions={'MSELoss' : batch_losses.StatefulLazyLoss(batch_losses.CrossEntropyLoss(reduction='mean'),
+                                                                     max_samples=60_000,
+                                                                     n_networks=N_NETWORKS,
+                                                                     reduction='mean')},
                                    track_accuracy=True),
                 interceptors.TestLoop('train', 
                                    eval_dataloader, 
-                                   criterions={'MSELoss' : batch_losses.CrossEntropyLoss(reduction='mean')},
+                                   criterions={'MSELoss' : batch_losses.StatefulLazyLoss(batch_losses.CrossEntropyLoss(reduction='mean'),
+                                                                     max_samples=60_000,
+                                                                     n_networks=N_NETWORKS,
+                                                                     reduction='mean')},
                                    track_accuracy=True),
                 interceptors.BackwardPassCounter(),
-                interceptors.PerSampleBackwardCounter(60_000),
+                bpcounter,
                 #interceptors.MistakeReplay(train, optimizer, replay_frequency=200, n_replays=np.linspace(0, 10, N_NETWORKS, dtype=int), batch_size=32),
                 #interceptors.EnergyL1NetworkTracker(previous_param_provider),
                 #interceptors.MinimumEnergyL1NetworkTracker(initial_param_provider),
@@ -847,11 +852,12 @@ if __name__ == '__main__':
                                test_dataloader, 
                                trackers=trackers, 
                                device=DEVICE)
-    trainer.train_loop(0.02, 0.01, sample_increment=1)
+    trainer.train_loop(1.5, 0.01)
     
-    d1=utils.convert_data(trainer.state['data'])
-    utils.print_data_structure(d1, 'd1')
+    d3=utils.convert_data(trainer.state['data'])
+    utils.print_data_structure(d3, 'd3')
     trainer.cleanup()
+    
     
     
     # model = nn.Sequential(trainables.BatchLinear(N_NETWORKS, N_IN, N_HID, 

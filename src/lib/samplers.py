@@ -1,6 +1,5 @@
 import torch
 import numpy as np
-from typing import Sized, Iterator, Literal
 import math
 
 from functools import partial
@@ -39,13 +38,13 @@ class IdenticalSampler(Sampler):
     A PyTorch Sampler used to explicitly copy items in a batch such that all
     networks view exactly the same items at exactly the same time.
     """
-    def __init__(self, data_source: Sized, batch_size, n_streams, drop_last=False):
+    def __init__(self, data_source, batch_size, n_streams, drop_last=False):
         self.data_source = data_source
         self.batch_size = batch_size
         self.n_streams = n_streams
         self.drop_last = drop_last
 
-    def __iter__(self) -> Iterator[list[int]]:
+    def __iter__(self):
         indices = torch.randperm(len(self.data_source)).tolist()
         
         for i in range(0, len(indices), self.batch_size):
@@ -75,7 +74,7 @@ class RandomSampler(Sampler):
         self.num_samples = len(self.data_source)
         self.drop_last = drop_last
 
-    def __iter__(self) -> Iterator[list[int]]:
+    def __iter__(self):
         shuffled_indices_per_net = [
             torch.randperm(self.num_samples) for _ in range(self.n_streams)
         ]
@@ -506,3 +505,117 @@ class FixedEpochSampler(Sampler):
             # We transpose to group by sample index across networks, then flatten.
             # Shape (batch_size, n_streams) -> flattened list
             yield step_batch.T.flatten().tolist()
+
+# note that using num_workers > 0 lags when hard_samples are put into the batch
+# the lag is greater the more workers. This is negligible in most cases as it 
+# only effects the first few forward passes of training.
+class HardMiningSampler(Sampler):
+    """
+    A PyTorch Sampler for batched networks that performs hard negative mining
+    by querying a hard index provider, using a fixed total batch size but
+    allowing for variable ratios of hard-to-normal samples per stream.
+    """
+    def __init__(self, data_source, n_streams, hard_index_provider, batch_size,
+                 hard_samples_per_batch, padding_value=-1):
+        super().__init__()
+
+        # --- Validation ---
+        if not hasattr(hard_index_provider, 'get_hard_indices'):
+            raise TypeError("hard_index_provider must have a 'get_hard_indices' method.")
+        
+        # --- Store Configuration ---
+        self.data_source = data_source
+        self.n_streams = n_streams
+        self.hard_index_provider = hard_index_provider
+        self.padding_value = padding_value
+        self.batch_size = batch_size
+        self.num_samples = len(data_source)
+
+        # --- Per-stream setup ---
+        self.hard_samples_per_batch = self._init_param(hard_samples_per_batch, "hard_samples_per_batch")
+        self.normal_samples_per_batch = self.batch_size - self.hard_samples_per_batch
+        
+        if (self.normal_samples_per_batch < 1).any():
+            raise ValueError(f"n_hard_samples must leave at least 1 normal sample within the batch" + 
+                             f" got batch_size={batch_size} and n_hard_samples={hard_samples_per_batch}" +
+                             f"leaving {self.normal_samples_per_batch}.")
+
+        # --- State for each epoch ---
+        self.normal_indices_queues = []
+        self._len = self.num_samples // batch_size
+
+    def _init_param(self, param, name):
+        """Helper to convert int inputs to a tensor."""
+        if isinstance(param, int):
+            param = [param] * self.n_streams
+        if len(param) != self.n_streams:
+            raise ValueError(f"Length of {name} must equal n_streams.")
+        return torch.tensor(param, dtype=torch.long)
+
+    def _prepare_epoch_queues(self):
+        """Pre-shuffles all indices for the epoch's 'normal' queue."""
+        self.normal_indices_queues = []
+        num_batches_per_stream = []
+
+        all_indices = list(range(len(self.data_source)))
+        
+        for i in range(self.n_streams):
+            shuffled_all_indices = all_indices.copy()
+            np.random.shuffle(shuffled_all_indices)
+            self.normal_indices_queues.append(shuffled_all_indices)
+            
+            num_normal = len(shuffled_all_indices)
+            normal_per_batch = self.normal_samples_per_batch[i].item()
+
+            num_batches_per_stream.append(num_normal // normal_per_batch)
+        
+        self._len = max(num_batches_per_stream) if num_batches_per_stream else 0
+
+    def __len__(self):
+        return self._len
+
+    def __iter__(self):
+
+        shuffled_indices_per_net = [
+            torch.randperm(self.num_samples) for _ in range(self.n_streams)
+        ]
+        transposed_indices = torch.stack(shuffled_indices_per_net).T
+        for batch_idx in range(self._len):
+
+            batch_indices = torch.full((self.n_streams, self.batch_size), self.padding_value, dtype=torch.long)
+            
+            for stream_idx in range(self.n_streams):
+
+                num_normal_needed = self.normal_samples_per_batch[stream_idx].item()
+                start = batch_idx * num_normal_needed
+                end = start + num_normal_needed
+
+                batch_normal = transposed_indices[start:end, stream_idx].tolist()
+                
+
+                num_hard_needed = self.hard_samples_per_batch[stream_idx].item()
+                batch_hard = []
+                if num_hard_needed > 0:
+                    current_hard_list = self.hard_index_provider.get_hard_indices(stream_idx)
+                    if len(current_hard_list) > 0:
+                        replace = len(current_hard_list) < num_hard_needed
+                        batch_hard = np.random.choice(
+                            current_hard_list, size=num_hard_needed, replace=replace
+                        ).tolist()
+
+                final_stream_batch = batch_normal + batch_hard
+                np.random.shuffle(final_stream_batch)
+                if final_stream_batch:
+                    batch_indices[stream_idx, :len(final_stream_batch)] = torch.tensor(final_stream_batch)
+            
+            yield batch_indices.T.flatten().tolist()
+
+
+                
+            
+        
+            
+        
+        
+        
+        
