@@ -727,12 +727,12 @@ if __name__ == '__main__':
     #                                    per_sample=True,
     #                                    reduction='mean') # note batch_losses
     
-    criterion1 = batch_losses.MSELoss(reduction='mean')
+    #criterion1 = batch_losses.MSELoss(reduction='mean')
     # criterion1 = batch_losses.MAELoss(reduction='mean')
-    # criterion1 = batch_losses.HingeLoss(reduction='mean')
+    criterion1 = batch_losses.HingeLoss(reduction='mean')
     #criterion1 = batch_losses.CrossEntropyLoss(reduction='mean')
-    criterion = batch_losses.LazyLoss(batch_losses.MSELoss(reduction='mean'),
-                                       reduction='mean')
+    #criterion = batch_losses.LazyLoss(batch_losses.MSELoss(reduction='mean'),
+    #                                   reduction='mean')
     # criterion1 = batch_losses.StatefulLazyLoss(batch_losses.CrossEntropyLoss(reduction='mean'),
     #                                   max_samples=60_000,
     #                                   n_networks=N_NETWORKS,
