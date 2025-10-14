@@ -780,7 +780,7 @@ class EnergyMetricTracker(Interceptor):
         self.log_key = self._generate_log_key()
 
     def _generate_log_key(self):
-        mode_prefix = 'minimum_energies' if self.mode == 'minimum_energies' else 'energies'
+        mode_prefix = 'minimum_energies' if self.mode == 'minimum_energy' else 'energies'
         return f"{mode_prefix}_l{self.p}_{self.granularity}"
 
     def _get_layer_names(self, model):
