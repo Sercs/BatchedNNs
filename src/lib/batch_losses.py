@@ -98,9 +98,11 @@ class HingeLoss(nn.Module): # conventionally Hinge is reduced by sum
             loss = torch.sum(unreduced_loss, dim=-1) * mask
         return loss
 
-class CrossEntropyLoss(nn.Module):
-    def __init__(self, reduction='mean', confidence_threshold=0.0): # cross-entropy already reduces last dim #
-                                          # this is only here for consistency
+class CrossEntropyLoss(nn.Module): # cross-entropy already reduces last dim 
+                                   # this is only here for consistency
+   #                                 |                                
+    def __init__(self, reduction='mean', confidence_threshold=0.0): 
+                                          
         """
         Args:
             reduction (str): How to reduce the batch (sum them or mean them)
