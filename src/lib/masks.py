@@ -139,13 +139,16 @@ def create_neuron_selection_mask(n_linears=None, n_out=None, n_in=None,
 
     n_linears, n_out, n_in = weight_mask.shape
     
+    if not isinstance(density, (list, np.ndarray, torch.Tensor)):
+        density = [density]*n_linears
+    
     for i in range(n_linears):
         # Find which neurons are currently active to select from
         active_indices = torch.where(weight_mask[i].any(dim=1))[0]
         n_active = len(active_indices)
         if n_active == 0: continue
 
-        n_to_keep = max(1, int(density * n_active)) if density > 0 else 0
+        n_to_keep = max(1, int(density[i] * n_active)) if density[i] > 0 else 0
         perm = torch.randperm(n_active, device=device)
         indices_to_prune = active_indices[perm[n_to_keep:]]
 
@@ -172,13 +175,16 @@ def create_global_sparsity_mask(n_linears=None, n_out=None, n_in=None,
         n_linears, n_out, n_in = weight_mask.shape # infer shape
 
     n_linears, n_out, n_in = weight_mask.shape
+    
+    if not isinstance(density, (list, np.ndarray, torch.Tensor)):
+        density = [density]*n_linears
 
     for i in range(n_linears):
         active_indices = torch.where(weight_mask[i] == 1)
         n_active = len(active_indices[0])
         if n_active == 0: continue
         
-        n_to_keep = max(1, int(density * n_active)) if density > 0 else 0
+        n_to_keep = max(1, int(density[i] * n_active)) if density[i] > 0 else 0
         
         perm = torch.randperm(n_active, device=device)
         indices_to_prune = (active_indices[0][perm[n_to_keep:]], active_indices[1][perm[n_to_keep:]])
@@ -196,13 +202,17 @@ def create_local_sparsity_mask(n_linears=None, n_out=None, n_in=None,
                                base_mask_config=None,
                                **kwargs):
     """Creates per-neuron sparsity by pruning connections for each neuron individually."""
+    
+    if not isinstance(density, (list, np.ndarray, torch.Tensor)):
+        density = [density]*n_linears
+        
     if base_mask_config is None:
         if n_linears is None or n_out is None or n_in is None:
             raise ValueError("Shape must be provided for creation.")
         weight_mask = torch.zeros((n_linears, n_out, n_in), device=device)
         
-        n_to_keep_per_neuron = max(1, int(density * n_in)) if density > 0 else 0
         for i in range(n_linears):
+            n_to_keep_per_neuron = max(1, int(density[i] * n_in)) if density[i] > 0 else 0
             for j in range(n_out):
                 perm = torch.randperm(n_in, device=device)
                 indices_to_keep = perm[:n_to_keep_per_neuron]
@@ -216,7 +226,7 @@ def create_local_sparsity_mask(n_linears=None, n_out=None, n_in=None,
                 n_active = len(active_indices)
                 if n_active == 0: continue
 
-                n_to_keep = max(1, int(density * n_active)) if density > 0 else 0
+                n_to_keep = max(1, int(density[i] * n_active)) if density[i] > 0 else 0
                 perm = torch.randperm(n_active, device=device)
                 indices_to_prune = active_indices[perm[n_to_keep:]]
                 

@@ -1281,8 +1281,8 @@ def recur_test():
 #       f"Ungrouped Params. Time: {ungrouped_time}\n" +
 #       f"Speed up: {grouped_time/ungrouped_time:.2f}x")
 
-#def test_two():
-if __name__ == '__main__':
+def test_two():
+#if __name__ == '__main__':
     DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
     N_NETWORKS = 10
     BATCH_SIZE = 1

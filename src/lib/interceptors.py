@@ -947,7 +947,7 @@ class DynamicActivityMasker(Interceptor):
                 selection = selection.transpose(1, 2)
             
             n_linears, n_neurons, n_synapses = selection.shape[0], selection.shape[1], selection.shape[2]
-            selection_flat = selection.reshape(-_1, n_synapses) 
+            selection_flat = selection.reshape(-1, n_synapses) 
 
             k_expanded = k_per_batch.repeat_interleave(n_neurons) 
             num_to_keep = torch.ceil(k_expanded * n_synapses).long()
