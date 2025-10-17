@@ -1281,8 +1281,8 @@ def recur_test():
 #       f"Ungrouped Params. Time: {ungrouped_time}\n" +
 #       f"Speed up: {grouped_time/ungrouped_time:.2f}x")
 
-def test_two():
-#if __name__ == '__main__':
+#def test_two():
+if __name__ == '__main__':
     DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
     N_NETWORKS = 10
     BATCH_SIZE = 1
@@ -1344,12 +1344,12 @@ def test_two():
                                                         ),
                           ).to(DEVICE)
     
-    optimizer = batch_optimizers.Competitive(batch_optimizers.SGD(model.parameters(), lr=LR), k=0.1)
-    criterion = batch_losses.CrossEntropyLoss()
+    optimizer = batch_optimizers.SGD(model.parameters(), lr=LR)
+    criterion = batch_losses.CrossEntropyLoss(confidence_threshold=np.linspace(0.5, 1.0, N_NETWORKS))
     
-    adv0_mask = interceptors.DynamicActivityMasker(model[0], np.linspace(0.0, 1.0, N_NETWORKS), mode='layer_wise_neuron', neuron_dim='outgoing', use_largest=True)
+    #adv0_mask = interceptors.DynamicActivityMasker(model[0], np.linspace(0.0, 1.0, N_NETWORKS), mode='layer_wise_neuron', neuron_dim='outgoing', use_largest=True)
     #adv1_mask = interceptors.AdversarialGradientMasker(model[1], np.linspace(0.0, 1.0, N_NETWORKS), mode='layer_wise_neuron', neuron_dim='incoming', use_largest=False)
-    mask = masks.MaskComposer(N_NETWORKS, N_IN, N_HID).start_with(masks.all_on).get_mask(bias_mode='off')
+    #mask = masks.MaskComposer(N_NETWORKS, N_IN, N_HID).start_with(masks.all_on).get_mask(bias_mode='off')
     
     previous_param_provider = interceptors.PreviousParameterProvider()
     initial_param_provider = interceptors.InitialParameterProvider()
@@ -1363,8 +1363,8 @@ def test_two():
                 interceptors.EnergyMetricTracker(1.0, initial_param_provider, mode='minimum_energy', granularity='network', components=['total', 'weight', 'bias']),
                 interceptors.EnergyMetricTracker(1.0, initial_param_provider, mode='minimum_energy', granularity='layerwise', components=['total', 'weight', 'bias']),
                 interceptors.EnergyMetricTracker(1.0, initial_param_provider, mode='minimum_energy', granularity='neuronwise', components=['weight', 'bias'], energy_direction=['outgoing', 'incoming']),
-                interceptors.MaskLinear(model[0], mask),
-                adv0_mask,
+                #interceptors.MaskLinear(model[0], mask),
+                #adv0_mask,
                 #adv1_mask,
                 interceptors.TestLoop('test', 
                                    test_dataloader, 
@@ -1386,4 +1386,4 @@ def test_two():
                                test_dataloader, 
                                trackers=trackers, 
                                device=DEVICE)
-    trainer.train_loop(1.0, 0.05)
+    trainer.train_loop(0.10, 0.01)

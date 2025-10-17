@@ -116,14 +116,20 @@ class CrossEntropyLoss(nn.Module): # cross-entropy already reduces last dim
         self.reduction = reduction
         # initialize the core loss function to get per-element losses
         self.loss_fn = nn.CrossEntropyLoss(reduction='none')
-        self.confidence_threshold = confidence_threshold
+        if isinstance(confidence_threshold, torch.Tensor):
+            self.confidence_threshold = confidence_threshold.unsqueeze(0)
+        elif isinstance(confidence_threshold, (int, float)):
+            self.confidence_threshold = torch.tensor(confidence_threshold)
+        else:
+            self.confidence_threshold = torch.tensor(confidence_threshold).unsqueeze(0)
 
     def forward(self, y_hat, y, idx=None, padding_value=-1):
+        self.confidence_threshold = self.confidence_threshold.to(y_hat.device)
         unreduced_loss = self.loss_fn(y_hat.transpose(1, -1), y.transpose(1, -1))
-        if self.confidence_threshold > 0:
+        if (self.confidence_threshold > 0).any():
             probs = F.softmax(y_hat, dim=-1)
-            confidence = (probs * y).sum(-1)
-            confidence_mask = (confidence < self.confidence_threshold).float()
+            confidence = (probs * y).sum(-1) # (b, n)
+            confidence_mask = ((confidence < self.confidence_threshold) | (self.confidence_threshold == 0.0)).float()
             unreduced_loss = unreduced_loss * confidence_mask
         mask = (idx != padding_value).float() # get padded items
 
