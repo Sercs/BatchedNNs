@@ -624,8 +624,8 @@ def sampler_test():
     #     plt.plot(acc2[line], color=pal2(line))
     # plt.show()
     
-#def v2_test():
-if __name__ == '__main__':
+def v2_test():
+#if __name__ == '__main__':
     #data = []
     #for DEGREES in [1, 1.5, 2, 2.5, 3, 3.5, 4, 4.5]:
     DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
@@ -645,14 +645,14 @@ if __name__ == '__main__':
         transforms.ToTensor(),
         transforms.Normalize((0.1307,), (0.3081,))
     ])
-    train_dataset = datasets.EMNIST(root='datasets',
+    train_dataset = datasets.MNIST(root='datasets',
                                 split='digits', # used as a quick swap for EMNIST
                                 train=True,
                                 download=True,
                                 transform=transform, # automatically coverts 0 - 255 --> 0 - 1
                                 target_transform=dm.temp_onehot)
     
-    test_dataset = datasets.EMNIST(root='datasets',
+    test_dataset = datasets.MNIST(root='datasets',
                                 split='digits', # used as a quick swap for EMNIST
                                 train=False,
                                 download=True,
@@ -1281,13 +1281,109 @@ def recur_test():
 #       f"Ungrouped Params. Time: {ungrouped_time}\n" +
 #       f"Speed up: {grouped_time/ungrouped_time:.2f}x")
 
+#def test_two():
+if __name__ == '__main__':
+    DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+    N_NETWORKS = 10
+    BATCH_SIZE = 1
+    N_IN = 784
+    N_HID = 500
+    N_OUT = 10
+    LR = 0.001
 
-"""
-    I want something that could be used to create subdatasets that can be created at the end of an epoch.
-    This requires computing the samples StatefulLazy uses to update on. 
-    We could have an observer that tracks this memory by looking at backwards updates. With a batch size
-    we need to track individual samples! 
+    transform = transforms.Compose([
+        transforms.ToTensor(),
+        transforms.Normalize((0.1307,), (0.3081,))
+    ])
+    train_dataset = datasets.MNIST(root='datasets',
+                             #split='digits', # used as a quick swap for EMNIST
+                                train=True,
+                                download=True,
+                                transform=transform, # automatically coverts 0 - 255 --> 0 - 1
+                                target_transform=dm.temp_onehot)
     
-    I also want to track "samples required" or "samples forwarded on", along with forward pass counts 
-    (noting -1 idx for small datasets) 
-"""
+    test_dataset = datasets.MNIST(root='datasets',
+                             #split='digits', # used as a quick swap for EMNIST
+                                train=False,
+                                download=True,
+                                transform=transform, # automatically coverts 0 - 255 --> 0 - 1
+                                target_transform=dm.temp_onehot)
+    
+    train = dm.DatasetWithIdx(train_dataset, task='classify')
+    test = dm.DatasetWithIdx(test_dataset, task='classify')
+    
+    s=samplers.IdenticalSampler(train, N_NETWORKS, BATCH_SIZE)
+    general_collate = samplers.collate_fn(N_NETWORKS)
+
+    train_dataloader = DataLoader(train,
+                              pin_memory=True,
+                              num_workers=0,
+                              batch_sampler=s,
+                              collate_fn=general_collate)
+    
+    eval_dataloader = DataLoader(train,
+                                 batch_size=16,
+                                 num_workers=4,
+                                 shuffle=False)
+
+    test_dataloader = DataLoader(test,
+                              batch_size=16,
+                              num_workers=4,
+                              shuffle=False)
+    
+    model = nn.Sequential(trainables.BatchLinear(N_NETWORKS, N_IN, N_HID, 
+                                                        activation=nn.GELU(),
+                                                        init_method='uniform',
+                                                        init_config={'a' : -1/np.power(784, 0.5),
+                                                                     'b' :1/np.power(784, 0.5)}
+                                                        ),
+                          trainables.BatchLinear(N_NETWORKS, N_HID, N_OUT,
+                                                        init_method='uniform',
+                                                        init_config={'a' : -1/np.power(100, 0.5),
+                                                                     'b' : 1/np.power(100, 0.5)}
+                                                        ),
+                          ).to(DEVICE)
+    
+    optimizer = batch_optimizers.Competitive(batch_optimizers.SGD(model.parameters(), lr=LR), k=0.1)
+    criterion = batch_losses.CrossEntropyLoss()
+    
+    adv0_mask = interceptors.DynamicActivityMasker(model[0], np.linspace(0.0, 1.0, N_NETWORKS), mode='layer_wise_neuron', neuron_dim='outgoing', use_largest=True)
+    #adv1_mask = interceptors.AdversarialGradientMasker(model[1], np.linspace(0.0, 1.0, N_NETWORKS), mode='layer_wise_neuron', neuron_dim='incoming', use_largest=False)
+    mask = masks.MaskComposer(N_NETWORKS, N_IN, N_HID).start_with(masks.all_on).get_mask(bias_mode='off')
+    
+    previous_param_provider = interceptors.PreviousParameterProvider()
+    initial_param_provider = interceptors.InitialParameterProvider()
+    trackers = [interceptors.Timer(),
+                interceptors.EpochCounter(60_000),
+                previous_param_provider,
+                initial_param_provider,
+                interceptors.EnergyMetricTracker(1.0, previous_param_provider, mode='energy', granularity='network', components=['total', 'weight', 'bias']),
+                interceptors.EnergyMetricTracker(1.0, previous_param_provider, mode='energy', granularity='layerwise', components=['total', 'weight', 'bias']),
+                interceptors.EnergyMetricTracker(1.0, previous_param_provider, mode='energy', granularity='neuronwise', components=['weight', 'bias'], energy_direction=['outgoing', 'incoming']),
+                interceptors.EnergyMetricTracker(1.0, initial_param_provider, mode='minimum_energy', granularity='network', components=['total', 'weight', 'bias']),
+                interceptors.EnergyMetricTracker(1.0, initial_param_provider, mode='minimum_energy', granularity='layerwise', components=['total', 'weight', 'bias']),
+                interceptors.EnergyMetricTracker(1.0, initial_param_provider, mode='minimum_energy', granularity='neuronwise', components=['weight', 'bias'], energy_direction=['outgoing', 'incoming']),
+                interceptors.MaskLinear(model[0], mask),
+                adv0_mask,
+                #adv1_mask,
+                interceptors.TestLoop('test', 
+                                   test_dataloader, 
+                                   criterions={'MSELoss' : criterion},
+                                   track_accuracy=True),
+                # interceptors.WeightStatsTracker(['weights', 'gradients'], 
+                #                                 stats_to_track=['mean', 'std', 'max', 'min', 'norm'],
+                #                                 granularity='global'),
+                interceptors.BackwardPassCounter(),
+                interceptors.ResultPrinter({'time_taken' : True, 
+                                            'test_accuracies' : True,
+                                            'test_losses' : ['MSELoss'],
+                                            'energies_l1.0_network' : ['total']})]
+    trainer = trainers.Trainer(model, 
+                               N_NETWORKS, 
+                               optimizer, 
+                               criterion, 
+                               train_dataloader, 
+                               test_dataloader, 
+                               trackers=trackers, 
+                               device=DEVICE)
+    trainer.train_loop(1.0, 0.05)

@@ -3,6 +3,11 @@
 # TODO [minor]: weight masking, providers as handlers, std
 
 from .trainables import BatchLinear
+
+from .samplers import FixedEpochSampler as FixedEpochSampler # used in mistake replay
+from .samplers import collate_fn as collate_fn # used in mistake replay
+from torch.utils.data import DataLoader # used in mistake replay
+
 import torch
 import torch.nn as nn
 import numpy as np
@@ -421,6 +426,132 @@ class PerSampleBackwardCounter(Interceptor):
 
     def get_hard_indices(self, i):
         return np.where(self.per_sample_backward_counts.T[i] > 0)[0].tolist()
+    
+# Gemini-Pro
+class WeightStatsTracker(Interceptor):
+    """
+    An interceptor that tracks a user-specified list of statistics for model
+    'weights' and/or 'gradients' with configurable granularity.
+    """
+    def __init__(self, tensors_to_track=['weights', 'gradients'], 
+                 stats_to_track=['mean', 'std', 'norm'], granularity='global'):
+        super().__init__()
+        
+        # --- Validation ---
+        if granularity not in ['global', 'layerwise']:
+            raise ValueError(f"granularity must be 'global' or 'layerwise', but got {granularity}")
+        supported_tensors = ['weights', 'gradients']
+        if not all(t in supported_tensors for t in tensors_to_track):
+            raise ValueError(f"tensors_to_track can only contain: {supported_tensors}")
+        supported_stats = ['mean', 'std', 'min', 'max', 'norm']
+        if not all(stat in supported_stats for stat in stats_to_track):
+            raise ValueError(f"stats_to_track can only contain: {supported_stats}")
+        
+        self.tensors_to_track = tensors_to_track
+        self.stats_to_track = stats_to_track
+        self.granularity = granularity
+        self.last_grads = None
+
+    def before_train(self, state):
+        """Initializes the data structures for logging based on granularity."""
+        for tensor_type in self.tensors_to_track:
+            log_key = f"{tensor_type}_stats_{self.granularity}"
+            if self.granularity == 'global':
+                state['data'][log_key] = {stat: [] for stat in self.stats_to_track}
+            else: # layerwise
+                state['data'][log_key] = {stat: {name: [] for name, _ in state['model'].named_parameters()} for stat in self.stats_to_track}
+
+    def before_step(self, state):
+        """Captures named gradients before the optimizer step."""
+        if 'gradients' in self.tensors_to_track:
+            self.last_grads = {n: p.grad.clone() for n, p in state['model'].named_parameters() if p.grad is not None}
+
+    def _calculate_stats(self, named_tensors, state):
+        """Helper to compute stats at the specified granularity, per network."""
+        if not named_tensors: return {}
+
+        if self.granularity == 'global':
+            n_networks = state['n_networks']
+            device = next(iter(named_tensors.values())).device
+            
+            # Reorganize tensors by network
+            params_per_network = [[] for _ in range(n_networks)]
+            for name, tensor in named_tensors.items():
+                split_tensors = torch.unbind(tensor, dim=0)
+                for i, t_slice in enumerate(split_tensors):
+                    params_per_network[i].append(t_slice.flatten())
+
+            # Calculate stats for each network's full parameter vector
+            stats_per_network = {stat: [] for stat in self.stats_to_track}
+            for i in range(n_networks):
+                if not params_per_network[i]: continue
+                vec = torch.cat(params_per_network[i]).detach()
+                
+                if 'mean' in self.stats_to_track: stats_per_network['mean'].append(vec.mean().item())
+                if 'std' in self.stats_to_track: stats_per_network['std'].append(vec.std().item())
+                if 'min' in self.stats_to_track: stats_per_network['min'].append(vec.min().item())
+                if 'max' in self.stats_to_track: stats_per_network['max'].append(vec.max().item())
+                if 'norm' in self.stats_to_track: stats_per_network['norm'].append(torch.linalg.norm(vec).item())
+
+            # Convert lists of stats to tensors
+            final_stats = {
+                stat: torch.tensor(values, device=device) 
+                for stat, values in stats_per_network.items() if values
+            }
+            return final_stats
+
+        else: # layerwise
+            layer_stats = {}
+            for name, tensor in named_tensors.items():
+                stats = {}
+                # Calculate stats over all dimensions except the first (network) dimension
+                reduce_dims = tuple(range(1, tensor.ndim))
+                
+                if reduce_dims:
+                    if 'mean' in self.stats_to_track: stats['mean'] = tensor.mean(dim=reduce_dims)
+                    if 'std' in self.stats_to_track: stats['std'] = tensor.std(dim=reduce_dims)
+                    if 'min' in self.stats_to_track: stats['min'] = tensor.amin(dim=reduce_dims)
+                    if 'max' in self.stats_to_track: stats['max'] = tensor.amax(dim=reduce_dims)
+                    if 'norm' in self.stats_to_track: stats['norm'] = torch.linalg.norm(tensor, dim=reduce_dims)
+                else: # Handle 1D batched tensors (e.g. bias for single output neuron)
+                    if 'mean' in self.stats_to_track: stats['mean'] = tensor.clone()
+                    if 'std' in self.stats_to_track: stats['std'] = torch.zeros_like(tensor)
+                    if 'min' in self.stats_to_track: stats['min'] = tensor.clone()
+                    if 'max' in self.stats_to_track: stats['max'] = tensor.clone()
+                    if 'norm' in self.stats_to_track: stats['norm'] = tensor.abs()
+
+                layer_stats[name] = stats
+            return layer_stats
+
+    def _log_stats(self, log_key, stats_data, state):
+        """Helper to log stats based on the granularity."""
+        if self.granularity == 'global':
+            for stat_name, value_tensor in stats_data.items():
+                if stat_name in state['data'][log_key]:
+                    state['data'][log_key][stat_name].append(value_tensor.cpu().numpy())
+        else: # layerwise
+            rearranged_data = {stat: {} for stat in self.stats_to_track}
+            for param_name, stats_dict in stats_data.items():
+                for stat_name, value_tensor in stats_dict.items():
+                    rearranged_data[stat_name][param_name] = value_tensor
+            
+            for stat_name, param_dict in rearranged_data.items():
+                for param_name, value_tensor in param_dict.items():
+                    if stat_name in state['data'][log_key] and param_name in state['data'][log_key][stat_name]:
+                        state['data'][log_key][stat_name][param_name].append(value_tensor.cpu().numpy())
+
+    @torch.no_grad()
+    def after_test(self, state):
+        """Calculates and logs stats at the end of an epoch."""
+        if 'weights' in self.tensors_to_track:
+            named_weights = {n: p.data for n, p in state['model'].named_parameters()}
+            weight_stats = self._calculate_stats(named_weights, state)
+            self._log_stats(f"weights_stats_{self.granularity}", weight_stats, state)
+        
+        if 'gradients' in self.tensors_to_track and self.last_grads:
+            grad_stats = self._calculate_stats(self.last_grads, state)
+            self._log_stats(f"gradients_stats_{self.granularity}", grad_stats, state)
+            self.last_grads = None
 
 ########################## NETWORK LOGIC MODIFICAITON ##########################
 class MaskLinear(Interceptor):
@@ -480,6 +611,379 @@ class MaskLinear(Interceptor):
     def before_test_forward(self, state):
         """Apply masks before testing forward pass."""
         self._apply_mask()
+        
+class AdversarialGradientMasker(Interceptor):
+    """
+    An interceptor that dynamically masks weights in a BatchLinear layer based on
+    anticipated gradients, inspired by the logic of the Competitive optimizer.
+
+    It supports various masking granularities:
+    - 'layer_wise_weight': Masks a fraction of connections across the entire layer.
+    - 'neuron_wise_weight': Masks a fraction of connections for each neuron individually.
+    - 'layer_wise_neuron': Masks entire neurons based on their total gradient contribution.
+    """
+    def __init__(self, layer, k_fraction, mode='layer_wise_weight', use_largest=True, neuron_dim=None):
+        if not hasattr(layer, 'weights'):
+            raise ValueError("The provided layer must be a BatchLinear instance.")
+        if mode not in ['layer_wise_weight', 'neuron_wise_weight', 'layer_wise_neuron']:
+            raise ValueError(f"Mode must be one of ['layer_wise_weight', 'neuron_wise_weight', 'layer_wise_neuron'].")
+        if 'neuron' in mode and neuron_dim not in ['incoming', 'outgoing']:
+            raise ValueError("neuron_dim must be 'incoming' or 'outgoing' for neuron modes.")
+        
+        self.layer = layer
+        self.k_fraction = self._process_k(k_fraction)
+        self.mode = mode
+        self.neuron_dim = neuron_dim
+        self.use_largest = use_largest
+        
+        self.original_weights = None
+        self.mask = None
+
+    def _process_k(self, k):
+        """Validates that k is a valid fraction between 0.0 and 1.0."""
+        if isinstance(k, (float, list, np.ndarray)):
+            k = torch.tensor(k, dtype=torch.float32)
+        if isinstance(k, torch.Tensor):
+            if torch.any((k < 0.0) | (k > 1.0)):
+                raise ValueError("All values for k_fraction must be between 0.0 and 1.0.")
+            return k
+        raise TypeError("k_fraction must be a float, list, np.ndarray, or torch.Tensor")
+
+    def before_train_forward(self, state):
+        """Hook for performing the preliminary pass, calculating and applying the mask."""
+        model = state['model']
+        x, y, idx, criterion = state['x'], state['y'], state['idx'], state['criterion']
+        
+        # 1. Preliminary Forward and Backward Pass
+        model.eval()
+        with torch.enable_grad():
+            model.zero_grad()
+            y_pred_naive = model(x)
+            per_sample_supervised_loss = criterion(y_pred_naive, y, idx, state['padding_value'])
+            mask = (idx != state['padding_value'])
+            n_valid_samples = mask.sum(0)
+            loss = per_sample_supervised_loss.sum(0) / (n_valid_samples + 1e-12) # average 
+            loss.sum().backward()
+        model.train()
+
+        grads = self.layer.weights.grad
+        if grads is None: return
+
+        # 2. Generate and store the mask
+        self.mask = self._generate_mask(grads)
+
+        # 3. Apply the mask
+        with torch.no_grad():
+            self.original_weights = self.layer.weights.data.clone()
+            self.layer.weights.data *= self.mask
+
+    def before_step(self, state):
+        """
+        Masks the gradients *before* the optimizer steps.
+        This ensures that only unmasked weights will receive an update.
+        """
+        if self.mask is not None and self.layer.weights.grad is not None:
+            with torch.no_grad():
+                # Zero out gradients for the weights that were masked
+                self.layer.weights.grad.data *= self.mask
+
+    def after_step(self, state):
+        """
+        Restores the *original* values for the masked-out weights,
+        while keeping the *newly updated* values for the unmasked weights.
+        """
+        if self.original_weights is not None and self.mask is not None:
+            with torch.no_grad():
+                # Get the weights tensor, which now contains the
+                # updated values for the unmasked parts
+                updated_weights = self.layer.weights.data
+                
+                # (1.0 - self.mask) creates a mask for the parts we want to restore
+                # (self.mask) creates a mask for the parts we want to keep
+                self.layer.weights.data = (updated_weights * self.mask) + \
+                                          (self.original_weights * (1.0 - self.mask))
+            
+            # Clear state for the next iteration
+            self.original_weights, self.mask = None, None
+
+    def _prepare_k_per_batch(self, p):
+        """Expands the k_fraction tensor to a per-network value."""
+        batch_size = p.shape[0]
+        device = p.device
+        k = self.k_fraction.to(device)
+
+        if k.ndim == 0:  # Scalar k
+            return k.expand(batch_size)
+        elif k.ndim == 1:  # 1D k
+            if len(k) != batch_size:
+                raise ValueError(f"1D k_fraction length ({len(k)}) must match batch size ({batch_size}).")
+            return k
+        else:
+            raise ValueError("k_fraction must be a scalar or 1D tensor.")
+
+    def _generate_mask(self, grads):
+        """
+        Generates the adversarial mask based on the specified mode.
+        k_fraction now refers to the fraction of weights/neurons to KEEP.
+        Ensures exactly k-fraction items are kept by using index-based scattering.
+        Randomly breaks ties by adding a small amount of noise.
+        """
+        n_linears = grads.shape[0]
+        k_per_batch = self._prepare_k_per_batch(grads) # k_fraction = fraction to KEEP
+        grads_abs = grads.abs()
+
+        # --- NEW: Add small random noise to break ties ---
+        # This ensures that if two gradients are identical (e.g., 0.5 and 0.5),
+        # the one chosen for the top-k is selected randomly.
+        # The noise is scaled to be extremely small and not affect non-tied items.
+        noise = torch.rand_like(grads_abs) * 1e-6 
+        grads_to_sort = grads_abs + noise
+        # --- END NEW ---
+
+        # Determine sort order
+        # use_largest=True -> keep largest -> sort descending
+        # use_largest=False -> keep smallest -> sort ascending
+        descending = self.use_largest
+
+        if self.mode == 'layer_wise_weight':
+            grads_flat = grads_to_sort.view(n_linears, -1) # Use grads_to_sort
+            num_elements = grads_flat.shape[1]
+            num_to_keep = torch.ceil(k_per_batch * num_elements).long()
+            num_to_keep.clamp_(max=num_elements)
+            
+            mask_flat = torch.zeros_like(grads_flat)
+            _, sorted_indices = torch.sort(grads_flat, dim=1, descending=descending) # Sort the noisy tensor
+            
+            arange_mask = torch.arange(num_elements, device=grads.device).expand_as(grads_flat)
+            k_mask = arange_mask < num_to_keep.unsqueeze(1)
+            
+            mask_flat.scatter_(1, sorted_indices, k_mask.float())
+            return mask_flat.view_as(grads)
+
+        elif self.mode == 'neuron_wise_weight':
+            selection = grads_to_sort.clone() # Use grads_to_sort
+            if self.neuron_dim == 'incoming':
+                selection = selection.transpose(1, 2)
+            
+            n_linears, n_neurons, n_synapses = selection.shape[0], selection.shape[1], selection.shape[2]
+            selection_flat = selection.reshape(-1, n_synapses) 
+
+            k_expanded = k_per_batch.repeat_interleave(n_neurons) 
+            num_to_keep = torch.ceil(k_expanded * n_synapses).long()
+            num_to_keep.clamp_(max=n_synapses) 
+
+            _, sorted_indices = torch.sort(selection_flat, dim=1, descending=descending) # Sort the noisy tensor
+
+            arange_mask = torch.arange(n_synapses, device=grads.device).expand_as(selection_flat)
+            k_mask = arange_mask < num_to_keep.unsqueeze(1) 
+
+            mask_flat = torch.zeros_like(selection_flat)
+            mask_flat.scatter_(1, sorted_indices, k_mask.float())
+            
+            mask = mask_flat.reshape(n_linears, n_neurons, n_synapses)
+            return mask.transpose(1, 2) if self.neuron_dim == 'incoming' else mask
+
+        elif self.mode == 'layer_wise_neuron':
+            sum_dim = 2 if self.neuron_dim == 'outgoing' else 1
+            # We must sum the *original* grads, but sort using the *noisy* ones
+            neuron_demand_abs = grads_abs.sum(dim=sum_dim)
+            neuron_demand_noisy = grads_to_sort.sum(dim=sum_dim) # Shape (n_linears, n_neurons)
+            
+            n_neurons = neuron_demand_abs.shape[1]
+            num_neurons_to_keep = torch.ceil(k_per_batch * n_neurons).long()
+            num_neurons_to_keep.clamp_(max=n_neurons)
+            
+            # Sort using the noisy demands to get randomized indices
+            _, sorted_indices = torch.sort(neuron_demand_noisy, dim=1, descending=descending)
+            
+            # Create a boolean mask for the top k indices
+            arange_mask = torch.arange(n_neurons, device=grads.device).expand_as(neuron_demand_abs)
+            k_mask = arange_mask < num_neurons_to_keep.unsqueeze(1)
+
+            # Create the final neuron mask (all zeros)
+            neuron_mask = torch.zeros_like(neuron_demand_abs, dtype=torch.float)
+            
+            # Scatter 1s into the mask at the positions of the winning neurons
+            neuron_mask.scatter_(1, sorted_indices, k_mask.float())
+
+            # Expand the neuron mask to the full weight tensor shape
+            mask = neuron_mask.unsqueeze(sum_dim).expand_as(grads)
+            # plt.imshow(neuron_mask[-1].detach().cpu().reshape(28,28))
+            # plt.show()
+            return mask.float()
+
+class DynamicActivityMasker(Interceptor):
+    """
+    An interceptor that dynamically masks weights in a BatchLinear layer based on
+    their magnitude ("activity") at the start of each step.
+
+    This implements a form of dynamic, temporary magnitude pruning.
+    The hooks ensure only the "kept" weights are trained for this step.
+    
+    It supports:
+    - 'layer_wise_weight': Keeps k% of connections across the entire layer.
+    - 'neuron_wise_weight': Keeps k% of connections for each neuron individually.
+    - 'layer_wise_neuron': Keeps k% of entire neurons based on their total weight magnitude.
+    """
+    def __init__(self, layer, k_fraction, mode='layer_wise_weight', use_largest=True, neuron_dim=None):
+        if not hasattr(layer, 'weights'):
+            raise ValueError("The provided layer must be a BatchLinear instance.")
+        if mode not in ['layer_wise_weight', 'neuron_wise_weight', 'layer_wise_neuron']:
+            raise ValueError(f"Mode must be one of ['layer_wise_weight', 'neuron_wise_weight', 'layer_wise_neuron'].")
+        if 'neuron' in mode and neuron_dim not in ['incoming', 'outgoing']:
+            raise ValueError("neuron_dim must be 'incoming' or 'outgoing' for neuron modes.")
+            
+        self.layer = layer
+        self.k_fraction = self._process_k(k_fraction)
+        self.mode = mode
+        self.neuron_dim = neuron_dim
+        self.use_largest = use_largest
+        
+        self.original_weights = None
+        self.mask = None
+
+    def _process_k(self, k):
+        """Validates that k is a valid fraction between 0.0 and 1.0."""
+        if isinstance(k, (float, list, np.ndarray)):
+            k = torch.tensor(k, dtype=torch.float32)
+        if isinstance(k, torch.Tensor):
+            if torch.any((k < 0.0) | (k > 1.0)):
+                raise ValueError("All values for k_fraction must be between 0.0 and 1.0.")
+            return k
+        raise TypeError("k_fraction must be a float, list, np.ndarray, or torch.Tensor")
+
+    def before_train_forward(self, state):
+        """
+        Hook for calculating the activity mask and applying it.
+        This is now much simpler as it doesn't need a preliminary pass.
+        """
+        # 1. Get the selection tensor (the weights themselves)
+        selection_tensor = self.layer.weights.data
+        if selection_tensor is None: return
+
+        # 2. Generate and store the mask based on weight magnitudes
+        self.mask = self._generate_mask(selection_tensor)
+
+        # 3. Apply the mask
+        with torch.no_grad():
+            self.original_weights = self.layer.weights.data.clone()
+            self.layer.weights.data *= self.mask
+
+    def before_step(self, state):
+        """
+        Masks the gradients *before* the optimizer steps.
+        This ensures that only unmasked weights will receive an update.
+        """
+        if self.mask is not None and self.layer.weights.grad is not None:
+            with torch.no_grad():
+                # Zero out gradients for the weights that were masked
+                self.layer.weights.grad.data *= self.mask
+
+    def after_step(self, state):
+        """
+        Restores the *original* values for the masked-out weights,
+        while keeping the *newly updated* values for the unmasked weights.
+        """
+        if self.original_weights is not None and self.mask is not None:
+            with torch.no_grad():
+                updated_weights = self.layer.weights.data
+                
+                # Restore original weights for masked-out parts
+                self.layer.weights.data = (updated_weights * self.mask) + \
+                                          (self.original_weights * (1.0 - self.mask))
+            
+            # Clear state for the next iteration
+            self.original_weights, self.mask = None, None
+
+    def _prepare_k_per_batch(self, p):
+        """Expands the k_fraction tensor to a per-network value."""
+        batch_size = p.shape[0]
+        device = p.device
+        k = self.k_fraction.to(device)
+
+        if k.ndim == 0:  # Scalar k
+            return k.expand(batch_size)
+        elif k.ndim == 1:  # 1D k
+            if len(k) != batch_size:
+                raise ValueError(f"1D k_fraction length ({len(k)}) must match batch size ({batch_size}).")
+            return k
+        else:
+            raise ValueError("k_fraction must be a scalar or 1D tensor.")
+
+    def _generate_mask(self, selection_tensor):
+        """
+        Generates the mask based on the selection tensor (weight magnitudes).
+        k_fraction now refers to the fraction of weights/neurons to KEEP.
+        """
+        n_linears = selection_tensor.shape[0]
+        k_per_batch = self._prepare_k_per_batch(selection_tensor) # k_fraction = fraction to KEEP
+        selection_abs = selection_tensor.abs()
+
+        # Add small random noise to break ties
+        noise = torch.rand_like(selection_abs) * 1e-6 
+        tensor_to_sort = selection_abs + noise
+
+        # Determine sort order
+        descending = self.use_largest
+
+        if self.mode == 'layer_wise_weight':
+            flat_tensor = tensor_to_sort.view(n_linears, -1)
+            num_elements = flat_tensor.shape[1]
+            num_to_keep = torch.ceil(k_per_batch * num_elements).long()
+            num_to_keep.clamp_(max=num_elements)
+            
+            mask_flat = torch.zeros_like(flat_tensor)
+            _, sorted_indices = torch.sort(flat_tensor, dim=1, descending=descending)
+            
+            arange_mask = torch.arange(num_elements, device=selection_tensor.device).expand_as(flat_tensor)
+            k_mask = arange_mask < num_to_keep.unsqueeze(1)
+            
+            mask_flat.scatter_(1, sorted_indices, k_mask.float())
+            return mask_flat.view_as(selection_tensor)
+
+        elif self.mode == 'neuron_wise_weight':
+            selection = tensor_to_sort.clone()
+            if self.neuron_dim == 'incoming':
+                selection = selection.transpose(1, 2)
+            
+            n_linears, n_neurons, n_synapses = selection.shape[0], selection.shape[1], selection.shape[2]
+            selection_flat = selection.reshape(-_1, n_synapses) 
+
+            k_expanded = k_per_batch.repeat_interleave(n_neurons) 
+            num_to_keep = torch.ceil(k_expanded * n_synapses).long()
+            num_to_keep.clamp_(max=n_synapses) 
+
+            _, sorted_indices = torch.sort(selection_flat, dim=1, descending=descending)
+
+            arange_mask = torch.arange(n_synapses, device=selection_tensor.device).expand_as(selection_flat)
+            k_mask = arange_mask < num_to_keep.unsqueeze(1) 
+
+            mask_flat = torch.zeros_like(selection_flat)
+            mask_flat.scatter_(1, sorted_indices, k_mask.float())
+            
+            mask = mask_flat.reshape(n_linears, n_neurons, n_synapses)
+            return mask.transpose(1, 2) if self.neuron_dim == 'incoming' else mask
+
+        elif self.mode == 'layer_wise_neuron':
+            sum_dim = 2 if self.neuron_dim == 'outgoing' else 1
+            # Sum original magnitudes, sort using noisy ones
+            neuron_demand_abs = selection_abs.sum(dim=sum_dim)
+            neuron_demand_noisy = tensor_to_sort.sum(dim=sum_dim)
+            
+            n_neurons = neuron_demand_abs.shape[1]
+            num_neurons_to_keep = torch.ceil(k_per_batch * n_neurons).long()
+            num_neurons_to_keep.clamp_(max=n_neurons)
+            
+            _, sorted_indices = torch.sort(neuron_demand_noisy, dim=1, descending=descending)
+            
+            arange_mask = torch.arange(n_neurons, device=selection_tensor.device).expand_as(neuron_demand_abs)
+            k_mask = arange_mask < num_neurons_to_keep.unsqueeze(1)
+
+            neuron_mask = torch.zeros_like(neuron_demand_abs, dtype=torch.float)
+            neuron_mask.scatter_(1, sorted_indices, k_mask.float())
+
+            mask = neuron_mask.unsqueeze(sum_dim).expand_as(selection_tensor)
+            return mask.float()
 
 ############################# AUXILLARY LOSSES ################################
 """
@@ -596,9 +1100,6 @@ class L2Regularizer(Interceptor):
 
 # TODO: in theory replay could be applied to any stat
 # TODO: this might require different logic to handle replay only events
-from .samplers import FixedEpochSampler as FixedEpochSampler
-from .samplers import collate_fn as collate_fn
-from torch.utils.data import DataLoader
 class MistakeReplay(Interceptor):
     def __init__(self, data_source, optimizer, replay_frequency, n_replays, batch_size, num_workers=0):
         super().__init__()
@@ -672,7 +1173,25 @@ class MistakeReplay(Interceptor):
                 self.optimizer.step()
                 self.trainer._fire_event('after_step')
                 # after_update would cause infinite loop, i know because that use to be here
+                
+class Automasking(Interceptor):
+    def __init__(self, threshold=0.1, p=1, model=None):
+        super().__init__()
+        self.model = model
+        self.p = p # metric used to deteremine "error"
+        self.threshold = threshold
         
+    def before_train(self, state):
+        if self.model is None:
+            self.model = state['model']
+    
+    @torch.no_grad()
+    def before_train_forward(self, state):
+        x_prime = self.model(state['x'])
+        mask = (x_prime.abs() - state['y'])**self.p > self.threshold
+        x_prime[mask] = 0
+        state['x'] = x_prime
+         
 ############################# PROVIDERS ################################
 """
 Providers "provide" some kind of value that is often used by multiple other
@@ -733,7 +1252,8 @@ This Interceptor generalizes the compute energy calculations (Li & van Rossum 20
 usually requires a provider. They have been split into network, layerwise and neuronwise
 to get different granularities of energy metrics.
 """    
-
+# kinda wild that you can feed all the energy interceptors as example and then Gemini-Pro 
+# can whip this up with surprisingly few corrections needed
 class EnergyMetricTracker(Interceptor):
     """
     A generalized interceptor to track the delta ("energy") of network parameters.

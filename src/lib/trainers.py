@@ -54,7 +54,7 @@ class Trainer():
         if dataset_size is None:
             n_samples = len(self.train_dataloader.dataset)
         else:
-            n_samples = dataset_size
+            n_samples = dataset_size 
 
         n_batches = len(self.train_dataloader)
         
@@ -62,14 +62,10 @@ class Trainer():
             test_interval = int(test_interval * n_samples)
         # computes stopping mid-epoch
         # good for quick tests (i.e. n_epochs = 0.01) 
-        if type(n_epochs) is float:
-            stop_on_sample = int(n_epochs * n_samples)
-        else:
-            stop_on_sample = n_epochs # n_epochs is whole number, therefore no need to stop mid-epoch
-
+        stop_on_sample = int(n_epochs * n_samples)
         test_epoch = 0
         sample_counter = 0
-
+        print(len(self.train_dataloader))
         # >>> Main loop <<<
         self._fire_event('before_train')
         for epoch in range(int(np.ceil((n_epochs)))):
