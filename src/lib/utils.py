@@ -171,3 +171,44 @@ def order_data(data, desired_name_order):
         if i == len(desired_name_order):
             break
     return {k: data[k] for k in target_order}
+
+def dict_to_latex_table(data_dict, k_header="Key", v_header="Value"):
+    """
+    Generates a LaTeX table string from a Python dictionary.
+
+    The keys of the dictionary become the 'k' column values, and 
+    the values of the dictionary become the 'v' column values.
+
+    Args:
+        data_dict (dict): The input dictionary.
+        k_header (str): The desired header for the 'key' column.
+        v_header (str): The desired header for the 'value' column.
+
+    Returns:
+        str: A string representing the LaTeX table environment.
+    """
+    # 1. Start the LaTeX table environment and define columns (l: left-aligned)
+    latex_string = "\\begin{tabular}{|l|l|}\n"
+    
+    # 2. Add the table headers
+    # \hline adds a horizontal line
+    latex_string += "    \\hline\n"
+    latex_string += f"    {k_header} & {v_header} \\\\\n"
+    latex_string += "    \\hline\n"
+
+    # 3. Add the table rows (data)
+    for key, value in data_dict.items():
+        # Ensure values are converted to strings for the output
+        # Replace LaTeX-sensitive characters if necessary (e.g., & -> \&, % -> \%)
+        # For simplicity here, we only ensure conversion to string
+        sanitized_key = str(key)
+        sanitized_value = str(value)
+
+        # & separates columns, \\ ends a row
+        latex_string += f"    {sanitized_key} & {sanitized_value} \\\\\n"
+    
+    # 4. Add the closing horizontal line and end the environment
+    latex_string += "    \\hline\n"
+    latex_string += "\\end{tabular}"
+
+    return latex_string

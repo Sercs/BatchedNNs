@@ -485,7 +485,7 @@ class WeightStatsTracker(Interceptor):
             stats_per_network = {stat: [] for stat in self.stats_to_track}
             for i in range(n_networks):
                 if not params_per_network[i]: continue
-                vec = torch.cat(params_per_network[i]).detach()
+                vec = torch.cat(params_per_network[i]).detach().abs()
                 
                 if 'mean' in self.stats_to_track: stats_per_network['mean'].append(vec.mean().item())
                 if 'std' in self.stats_to_track: stats_per_network['std'].append(vec.std().item())

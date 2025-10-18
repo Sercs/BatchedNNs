@@ -1312,7 +1312,11 @@ if __name__ == '__main__':
     train = dm.DatasetWithIdx(train_dataset, task='classify')
     test = dm.DatasetWithIdx(test_dataset, task='classify')
     
-    s=samplers.IdenticalSampler(train, N_NETWORKS, BATCH_SIZE)
+    s=samplers.VaryBatchAndDatasetSizeSampler(train, 
+                                              N_NETWORKS, 
+                                              60_000, 
+                                              [1, 2, 4, 8, 16, 32, 64, 128, 256, 512],
+                                              method='loop')
     general_collate = samplers.collate_fn(N_NETWORKS)
 
     train_dataloader = DataLoader(train,
@@ -1386,4 +1390,4 @@ if __name__ == '__main__':
                                test_dataloader, 
                                trackers=trackers, 
                                device=DEVICE)
-    trainer.train_loop(0.10, 0.01)
+    trainer.train_loop(1, 0.01, sample_increment=1)
