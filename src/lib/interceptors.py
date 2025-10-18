@@ -1305,7 +1305,7 @@ class EnergyMetricTracker(Interceptor):
 
     def _get_layer_names(self, model):
         """Helper to get unique layer prefixes from parameter names."""
-        return sorted(list(set([n.split('.')[0]+'.layer' for n, _ in model.named_parameters()])))
+        return sorted(list(set([n.split('.')[0] for n, _ in model.named_parameters()])))
 
     @torch.no_grad()
     def before_train(self, state):
