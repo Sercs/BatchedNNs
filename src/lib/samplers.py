@@ -597,7 +597,7 @@ class HardMiningSampler(Sampler):
                 num_hard_needed = self.hard_samples_per_batch[stream_idx].item()
                 batch_hard = []
                 if num_hard_needed > 0:
-                    current_hard_list = self.hard_index_provider.get_hard_indices(stream_idx)
+                    current_hard_list = self.hard_index_provider.get_samples_as_list_per_network(stream_idx)
                     if len(current_hard_list) > 0:
                         replace = len(current_hard_list) < num_hard_needed
                         batch_hard = np.random.choice(

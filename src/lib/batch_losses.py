@@ -89,7 +89,7 @@ class HingeLoss(nn.Module): # conventionally Hinge is reduced by sum
         target_activities = torch.sum(y_hat * y, dim=-1, keepdim=True)
         margins = self.margin + y_hat - target_activities
         loss_terms = self.func(margins)
-        unreduced_loss = loss_terms * (y < 1)
+        unreduced_loss = loss_terms * (y < 1).float()
             
         mask = (idx != padding_value).float()  # get padded items
         if self.reduction == 'mean':

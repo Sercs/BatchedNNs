@@ -423,11 +423,16 @@ class PerSampleBackwardCounter(Interceptor):
 
     def after_train(self, state):
         state['data']['per_sample_backward_counts'] = self.per_sample_backward_counts.clone().numpy()
-
-    def get_hard_indices(self, i):
+    
+    # interface with replay
+    def get_samples(self):
+        return self.per_sample_backward_counts
+    
+    # interface with hard mining sampler     
+    def get_samples_as_list_per_network(self, i):
         return np.where(self.per_sample_backward_counts.T[i] > 0)[0].tolist()
     
-class RememberSamples(Interceptor):
+class RememberMistakes(Interceptor):
     def __init__(self, max_samples, forget=False):
         super().__init__()
         if not isinstance(max_samples, int) or max_samples <= 0:
@@ -436,8 +441,8 @@ class RememberSamples(Interceptor):
 
     def before_train(self, state):
         n_networks = state['n_networks']
-        self.per_sample_backward_counts = torch.zeros((self.max_samples, n_networks), dtype=torch.long)
-        state['data']['per_sample_backward_counts'] = self.per_sample_backward_counts
+        self.remember_samples = torch.zeros((self.max_samples, n_networks), dtype=torch.long)
+        state['data']['remember_samples'] = self.remember_samples
 
     def after_update(self, state):
         per_sample_loss = state.get('per_sample_losses').cpu()
@@ -457,22 +462,30 @@ class RememberSamples(Interceptor):
                             #    Gemini-Pro 2.5 tip
                             #             |
                             #             V
-        self.per_sample_backward_counts.index_put_(
+        self.remember_samples.index_put_(
             (idx[update_coords], update_coords[1]),
             torch.tensor(1, device='cpu')
         )
 
     def after_train(self, state):
-        state['data']['per_sample_backward_counts'] = self.per_sample_backward_counts.clone().numpy()
-        
-    def forget_samples(self, forget_idxs):
-        self.per_sample_backward_counts.index_put_(
+        state['data']['remember_samples'] = self.remember_samples.clone().numpy()
+    
+    # interface with replay
+    def forget_samples(self, y_hat, y, idx=None, padding_value=None):
+        correct = ((y_hat.argmax(-1) == y.argmax(-1)) * (idx != padding_value)).sum(0)
+        forget_idxs = torch.where(correct)
+        self.remember_samples.index_put_(
             forget_idxs,
-            torch.tensor(0, device=self.per_sample_backward_counts.device)
+            torch.tensor(0, device=self.remember_samples.device)
             )
-        
-    def get_hard_indices(self, i):
-        return np.where(self.per_sample_backward_counts.T[i] > 0)[0].tolist()
+    
+    # interface with replay
+    def get_samples(self):
+        return self.remember_samples
+    
+    # interface with hard mining sampler 
+    def get_samples_as_list_per_network(self, i):
+        return np.where(self.remember_samples.T[i] > 0)[0].tolist()
     
 # Gemini-Pro
 class WeightStatsTracker(Interceptor):
@@ -1148,7 +1161,7 @@ class L2Regularizer(Interceptor):
 # TODO: in theory replay could be applied to any stat
 # TODO: this might require different logic to handle replay only events
 class MistakeReplay(Interceptor):
-    def __init__(self, data_source, optimizer, replay_frequency, n_replays, batch_size, criterion=None, forget=False, num_workers=0):
+    def __init__(self, sample_memorizer, data_source, optimizer, replay_frequency, n_replays, batch_size, criterion=None, forget=False, num_workers=0):
         super().__init__()
         self.data_source = data_source
         self.optimizer = optimizer
@@ -1157,6 +1170,7 @@ class MistakeReplay(Interceptor):
         self.batch_size = batch_size
         self.forget = forget
         self.criterion = criterion
+        self.sample_memorizer = sample_memorizer
         
     def before_train(self, state):
         n_networks, device = state['n_networks'], state['device']
@@ -1171,7 +1185,7 @@ class MistakeReplay(Interceptor):
         if not active_on_freq.any():
             return
         
-        per_sample_backward_counts = state['data'].get('per_sample_backward_counts')
+        per_sample_backward_counts = self.sample_memorizer.get_samples()
         if per_sample_backward_counts is None:
             print("⚠️ 'per_sample_backward_counts' not in state. Use PerSampleBackwardCounter(...). Skipping replay.")
             return
@@ -1223,11 +1237,7 @@ class MistakeReplay(Interceptor):
                 self.trainer._fire_event('after_step')
                 
                 if self.forget:
-                    forget_idxs = torch.where(correct)
-                    state['data']['per_sample_backward_counts'].index_put_(
-                        forget_idxs,
-                        torch.tensor(0, device=state['data']['per_sample_backward_counts'].device)
-                        )
+                    self.sample_memorizer.forget_samples(y_hat, y, idx, state['padding_value'])
                     
                 # after_update would cause infinite loop, i know because that use to be here
                 

@@ -1358,14 +1358,16 @@ if __name__ == '__main__':
     optimizer = batch_optimizers.SGD(model.parameters(), lr=LR)
     replay_optimizer = batch_optimizers.SGD(model.parameters(), lr=0.01*16)
     
-    replay_criterion = batch_losses.CrossEntropyLoss()
     criterion = batch_losses.HingeLoss(margin=0.1)
     
     previous_param_provider = interceptors.PreviousParameterProvider()
     initial_param_provider = interceptors.InitialParameterProvider()
+    remember_mistakes = interceptors.RememberMistakes(60_000)
     trackers = [interceptors.Timer(),
                 interceptors.EpochCounter(60_000),
-                interceptors.RememberSamples(60_000),
+                interceptors.ForwardPassCounter(),
+                interceptors.BackwardPassCounter(),
+                remember_mistakes,
                 previous_param_provider,
                 initial_param_provider,
                 interceptors.EnergyMetricTracker(1.0, previous_param_provider, mode='energy', granularity='network', components=['total', 'weight', 'bias']),
@@ -1374,10 +1376,7 @@ if __name__ == '__main__':
                 interceptors.EnergyMetricTracker(1.0, initial_param_provider, mode='minimum_energy', granularity='network', components=['total', 'weight', 'bias']),
                 interceptors.EnergyMetricTracker(1.0, initial_param_provider, mode='minimum_energy', granularity='layerwise', components=['total', 'weight', 'bias']),
                 interceptors.EnergyMetricTracker(1.0, initial_param_provider, mode='minimum_energy', granularity='neuronwise', components=['weight', 'bias'], energy_direction=['outgoing', 'incoming']),
-                #interceptors.MaskLinear(model[0], mask),
-                #adv0_mask,
-                #adv1_mask,
-                interceptors.MistakeReplay(train, optimizer, 100, 5, 16, forget=True, criterion=replay_criterion),
+                interceptors.MistakeReplay(remember_mistakes, train, optimizer, 600, 2, 1, forget=True),
                 interceptors.TestLoop('test', 
                                    test_dataloader, 
                                    criterions={'MSELoss' : criterion},
