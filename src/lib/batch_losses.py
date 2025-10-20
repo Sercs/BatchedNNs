@@ -61,7 +61,7 @@ class MAELoss(nn.Module):
         return loss
 
 class HingeLoss(nn.Module): # conventionally Hinge is reduced by sum
-    def __init__(self, reduction='sum', func=nn.ReLU(), margin=1.0):
+    def __init__(self, reduction='mean', func=nn.ReLU(), margin=1.0):
         """
         Args:
             reduction (str): The reduction operation to apply: 'mean' or 'sum'.
@@ -137,14 +137,26 @@ class CrossEntropyLoss(nn.Module): # cross-entropy already reduces last dim
         return loss
 
 class LazyLoss(nn.Module):
-    def __init__(self, loss_fn, reduction=None): # the wrapped loss function should handle reduction
+    def __init__(self, loss_fn, gamma=0.0, reduction=None): # the wrapped loss function should handle reduction
         super().__init__()                         # only here for consistency
         self.wrapped_loss_fn = loss_fn 
         self.reduction = reduction
-        
+        if isinstance(gamma, torch.Tensor):
+            self.gamma = gamma.unsqueeze(0)
+        elif isinstance(gamma, (int, float)):
+            self.gamma = torch.tensor(gamma)
+        else:
+            self.gamma = torch.tensor(gamma).unsqueeze(0)
+            
     def forward(self, y_hat, y, idx=None, padding_value=-1):
-        update = (y_hat.argmax(-1) != y.argmax(-1))
-        per_sample_losses = self.wrapped_loss_fn(y_hat, y, idx) * update
+        self.gamma = self.gamma.to(y_hat.device)
+        if (self.gamma).any() > 0.0:
+            idx = (y_hat.argmax(-1) == y.argmax(-1))
+            update = idx * self.gamma + ~idx
+            per_sample_losses = self.wrapped_loss_fn(y_hat, y, idx) * update
+        else:
+            update = (y_hat.argmax(-1) != y.argmax(-1))
+            per_sample_losses = self.wrapped_loss_fn(y_hat, y, idx) * update
         
         mask = (idx != padding_value).float()  # get padded items
 

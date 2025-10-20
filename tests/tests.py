@@ -1287,9 +1287,10 @@ if __name__ == '__main__':
     N_NETWORKS = 10
     BATCH_SIZE = 1
     N_IN = 784
-    N_HID = 500
+    N_HID = 100
     N_OUT = 10
     LR = 0.001
+    N_EPOCHS = 10
 
     transform = transforms.Compose([
         transforms.ToTensor(),
@@ -1312,11 +1313,7 @@ if __name__ == '__main__':
     train = dm.DatasetWithIdx(train_dataset, task='classify')
     test = dm.DatasetWithIdx(test_dataset, task='classify')
     
-    s=samplers.VaryBatchAndDatasetSizeSampler(train, 
-                                              N_NETWORKS, 
-                                              60_000, 
-                                              [1, 2, 4, 8, 16, 32, 64, 128, 256, 512],
-                                              method='loop')
+    s=samplers.RandomSampler(train, N_NETWORKS, 1)
     general_collate = samplers.collate_fn(N_NETWORKS)
 
     train_dataloader = DataLoader(train,
@@ -1332,7 +1329,7 @@ if __name__ == '__main__':
 
     test_dataloader = DataLoader(test,
                               batch_size=16,
-                              num_workers=4,
+                              num_workers=0,
                               shuffle=False)
     
     model = nn.Sequential(trainables.BatchLinear(N_NETWORKS, N_IN, N_HID, 
@@ -1340,6 +1337,16 @@ if __name__ == '__main__':
                                                         init_method='uniform',
                                                         init_config={'a' : -1/np.power(784, 0.5),
                                                                      'b' :1/np.power(784, 0.5)}
+                                                        ),
+                          trainables.BatchLinear(N_NETWORKS, N_HID, N_HID,
+                                                        init_method='uniform',
+                                                        init_config={'a' : -1/np.power(100, 0.5),
+                                                                     'b' : 1/np.power(100, 0.5)}
+                                                        ),
+                          trainables.BatchLinear(N_NETWORKS, N_HID, N_HID,
+                                                        init_method='uniform',
+                                                        init_config={'a' : -1/np.power(100, 0.5),
+                                                                     'b' : 1/np.power(100, 0.5)}
                                                         ),
                           trainables.BatchLinear(N_NETWORKS, N_HID, N_OUT,
                                                         init_method='uniform',
@@ -1349,16 +1356,16 @@ if __name__ == '__main__':
                           ).to(DEVICE)
     
     optimizer = batch_optimizers.SGD(model.parameters(), lr=LR)
-    criterion = batch_losses.CrossEntropyLoss(confidence_threshold=np.linspace(0.5, 1.0, N_NETWORKS))
+    replay_optimizer = batch_optimizers.SGD(model.parameters(), lr=0.01*16)
     
-    #adv0_mask = interceptors.DynamicActivityMasker(model[0], np.linspace(0.0, 1.0, N_NETWORKS), mode='layer_wise_neuron', neuron_dim='outgoing', use_largest=True)
-    #adv1_mask = interceptors.AdversarialGradientMasker(model[1], np.linspace(0.0, 1.0, N_NETWORKS), mode='layer_wise_neuron', neuron_dim='incoming', use_largest=False)
-    #mask = masks.MaskComposer(N_NETWORKS, N_IN, N_HID).start_with(masks.all_on).get_mask(bias_mode='off')
+    replay_criterion = batch_losses.CrossEntropyLoss()
+    criterion = batch_losses.HingeLoss(margin=0.1)
     
     previous_param_provider = interceptors.PreviousParameterProvider()
     initial_param_provider = interceptors.InitialParameterProvider()
     trackers = [interceptors.Timer(),
                 interceptors.EpochCounter(60_000),
+                interceptors.RememberSamples(60_000),
                 previous_param_provider,
                 initial_param_provider,
                 interceptors.EnergyMetricTracker(1.0, previous_param_provider, mode='energy', granularity='network', components=['total', 'weight', 'bias']),
@@ -1370,6 +1377,7 @@ if __name__ == '__main__':
                 #interceptors.MaskLinear(model[0], mask),
                 #adv0_mask,
                 #adv1_mask,
+                interceptors.MistakeReplay(train, optimizer, 100, 5, 16, forget=True, criterion=replay_criterion),
                 interceptors.TestLoop('test', 
                                    test_dataloader, 
                                    criterions={'MSELoss' : criterion},
@@ -1382,7 +1390,7 @@ if __name__ == '__main__':
                                             'test_accuracies' : True,
                                             'test_losses' : ['MSELoss'],
                                             'energies_l1.0_network' : ['total']})]
-    trainer = trainers.Trainer(model, 
+    trainer2 = trainers.Trainer(model, 
                                N_NETWORKS, 
                                optimizer, 
                                criterion, 
@@ -1390,4 +1398,6 @@ if __name__ == '__main__':
                                test_dataloader, 
                                trackers=trackers, 
                                device=DEVICE)
-    trainer.train_loop(1, 0.01, sample_increment=1)
+    trainer2.train_loop(0.05, 0.005)
+    
+    

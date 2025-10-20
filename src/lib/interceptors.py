@@ -427,6 +427,53 @@ class PerSampleBackwardCounter(Interceptor):
     def get_hard_indices(self, i):
         return np.where(self.per_sample_backward_counts.T[i] > 0)[0].tolist()
     
+class RememberSamples(Interceptor):
+    def __init__(self, max_samples, forget=False):
+        super().__init__()
+        if not isinstance(max_samples, int) or max_samples <= 0:
+            raise ValueError("max_samples must be a positive integer.")
+        self.max_samples = max_samples
+
+    def before_train(self, state):
+        n_networks = state['n_networks']
+        self.per_sample_backward_counts = torch.zeros((self.max_samples, n_networks), dtype=torch.long)
+        state['data']['per_sample_backward_counts'] = self.per_sample_backward_counts
+
+    def after_update(self, state):
+        per_sample_loss = state.get('per_sample_losses').cpu()
+        idx = state.get('idx').cpu()
+
+        if per_sample_loss is None or idx is None:
+            return
+
+        # get indices of valid samples that contributed to the loss
+        update_coords = torch.where(
+            (per_sample_loss > 1e-9) & (idx != state.get('padding_value', -1)) # eps for rounding errors
+        )
+        
+        if update_coords[0].numel() == 0:
+            return 
+
+                            #    Gemini-Pro 2.5 tip
+                            #             |
+                            #             V
+        self.per_sample_backward_counts.index_put_(
+            (idx[update_coords], update_coords[1]),
+            torch.tensor(1, device='cpu')
+        )
+
+    def after_train(self, state):
+        state['data']['per_sample_backward_counts'] = self.per_sample_backward_counts.clone().numpy()
+        
+    def forget_samples(self, forget_idxs):
+        self.per_sample_backward_counts.index_put_(
+            forget_idxs,
+            torch.tensor(0, device=self.per_sample_backward_counts.device)
+            )
+        
+    def get_hard_indices(self, i):
+        return np.where(self.per_sample_backward_counts.T[i] > 0)[0].tolist()
+    
 # Gemini-Pro
 class WeightStatsTracker(Interceptor):
     """
@@ -1101,13 +1148,15 @@ class L2Regularizer(Interceptor):
 # TODO: in theory replay could be applied to any stat
 # TODO: this might require different logic to handle replay only events
 class MistakeReplay(Interceptor):
-    def __init__(self, data_source, optimizer, replay_frequency, n_replays, batch_size, num_workers=0):
+    def __init__(self, data_source, optimizer, replay_frequency, n_replays, batch_size, criterion=None, forget=False, num_workers=0):
         super().__init__()
         self.data_source = data_source
         self.optimizer = optimizer
         self.replay_frequency = replay_frequency # TODO: check list
         self.n_replays = n_replays
         self.batch_size = batch_size
+        self.forget = forget
+        self.criterion = criterion
         
     def before_train(self, state):
         n_networks, device = state['n_networks'], state['device']
@@ -1138,9 +1187,9 @@ class MistakeReplay(Interceptor):
                                      collate_fn=collate_fn(state['n_networks']),
                                      num_workers=4,
                                      shuffle=False)
+        criterion = state['criterion'] if self.criterion is None else self.criterion
         for replay_step in range(1, max_replays_this_step+1): # means n_replays [0, 0, 1, 2] gives no replay to 0s
             active_this_loop = (active_on_freq & (replay_step <= self.n_replays)).float()
-            print(active_this_loop)
             # do loop
             for (x, y, idx) in replay_dataloader:
                 x, y, idx = x.to(state['device']), y.to(state['device']), idx.to(state['device']) 
@@ -1154,7 +1203,7 @@ class MistakeReplay(Interceptor):
                 
                 self.optimizer.zero_grad()
                 
-                per_sample_supervised_loss = state['criterion'](y_hat, y, idx, state['padding_value'])
+                per_sample_supervised_loss = criterion(y_hat, y, idx, state['padding_value'])
                 state['per_sample_losses'] = per_sample_supervised_loss
                 mask = (idx != state['padding_value'])
                 n_valid_samples = mask.sum(0)
@@ -1172,6 +1221,14 @@ class MistakeReplay(Interceptor):
                 self.trainer._fire_event('before_step')
                 self.optimizer.step()
                 self.trainer._fire_event('after_step')
+                
+                if self.forget:
+                    forget_idxs = torch.where(correct)
+                    state['data']['per_sample_backward_counts'].index_put_(
+                        forget_idxs,
+                        torch.tensor(0, device=state['data']['per_sample_backward_counts'].device)
+                        )
+                    
                 # after_update would cause infinite loop, i know because that use to be here
                 
 class Automasking(Interceptor):
