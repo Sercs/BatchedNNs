@@ -472,12 +472,13 @@ class RememberMistakes(Interceptor):
     
     # interface with replay
     def forget_samples(self, y_hat, y, idx=None, padding_value=None):
-        correct = ((y_hat.argmax(-1) == y.argmax(-1)) * (idx != padding_value)).sum(0)
+        correct = ((y_hat.argmax(-1) == y.argmax(-1)) * (idx != padding_value))
         forget_idxs = torch.where(correct)
         self.remember_samples.index_put_(
-            forget_idxs,
+            (idx[correct], forget_idxs[1]),
             torch.tensor(0, device=self.remember_samples.device)
             )
+        #print(self.remember_samples.sum(0))
     
     # interface with replay
     def get_samples(self):
@@ -1161,7 +1162,15 @@ class L2Regularizer(Interceptor):
 # TODO: in theory replay could be applied to any stat
 # TODO: this might require different logic to handle replay only events
 class MistakeReplay(Interceptor):
-    def __init__(self, sample_memorizer, data_source, optimizer, replay_frequency, n_replays, batch_size, criterion=None, forget=False, num_workers=0):
+    def __init__(self, sample_memorizer, 
+                       data_source, 
+                       optimizer, 
+                       replay_frequency, 
+                       n_replays, 
+                       batch_size, 
+                       criterion=None, 
+                       forget=False, 
+                       num_workers=0):
         super().__init__()
         self.data_source = data_source
         self.optimizer = optimizer
@@ -1171,6 +1180,7 @@ class MistakeReplay(Interceptor):
         self.forget = forget
         self.criterion = criterion
         self.sample_memorizer = sample_memorizer
+        self.num_workers = num_workers 
         
     def before_train(self, state):
         n_networks, device = state['n_networks'], state['device']
@@ -1184,25 +1194,25 @@ class MistakeReplay(Interceptor):
         active_on_freq = (self.replay_frequencies > 0) & (step % self.replay_frequencies == 0)
         if not active_on_freq.any():
             return
-        
-        per_sample_backward_counts = self.sample_memorizer.get_samples()
-        if per_sample_backward_counts is None:
-            print("⚠️ 'per_sample_backward_counts' not in state. Use PerSampleBackwardCounter(...). Skipping replay.")
+
+        if not hasattr(self.sample_memorizer, 'get_samples'):
+            print("⚠️ '.get_samples()' not in sample_memorizer. Skipping replay.")
             return
         
         max_replays_this_step = self.n_replays[active_on_freq].max().item()
-        idxs_to_replay = [torch.tensor(np.where(n > 0)[0]) if active_on_freq[i] else [] for i, n in enumerate(per_sample_backward_counts.T)]
-        replay_sampler = FixedEpochSampler(self.data_source,
-                                       idxs_to_replay,
-                                       self.batch_size,
-                                       padding_value=state['padding_value'])
-        replay_dataloader = DataLoader(self.data_source,
-                                     batch_sampler=replay_sampler,
-                                     collate_fn=collate_fn(state['n_networks']),
-                                     num_workers=4,
-                                     shuffle=False)
         criterion = state['criterion'] if self.criterion is None else self.criterion
         for replay_step in range(1, max_replays_this_step+1): # means n_replays [0, 0, 1, 2] gives no replay to 0s
+            per_sample_backward_counts = self.sample_memorizer.get_samples()
+            idxs_to_replay = [torch.tensor(np.where(n > 0)[0]) if active_on_freq[i] else [] for i, n in enumerate(per_sample_backward_counts.T)]
+            replay_sampler = FixedEpochSampler(self.data_source,
+                                           idxs_to_replay,
+                                           self.batch_size,
+                                           padding_value=state['padding_value'])
+            replay_dataloader = DataLoader(self.data_source,
+                                         batch_sampler=replay_sampler,
+                                         collate_fn=collate_fn(state['n_networks']),
+                                         num_workers=self.num_workers,
+                                         shuffle=False)
             active_this_loop = (active_on_freq & (replay_step <= self.n_replays)).float()
             # do loop
             for (x, y, idx) in replay_dataloader:

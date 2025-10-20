@@ -1171,11 +1171,6 @@ def recur_test():
                                                         init_method='uniform',
                                                         init_config={'a' : -1/np.sqrt(784),
                                                                      'b' : 1/np.sqrt(784)}),
-                          trainables.BatchLinear(N_NETWORKS, N_HID, N_HID, 
-                                                        activation=nn.GELU(),
-                                                        init_method='uniform',
-                                                        init_config={'a' : -1/np.sqrt(100),
-                                                                     'b' : 1/np.sqrt(100)}),
                           trainables.BatchLinear(N_NETWORKS, N_HID, N_OUT,
                                                         init_method='uniform',
                                                         init_config={'a' : -1/np.sqrt(100),
@@ -1289,7 +1284,7 @@ if __name__ == '__main__':
     N_IN = 784
     N_HID = 100
     N_OUT = 10
-    LR = 0.001
+    LR = 0.0005
     N_EPOCHS = 10
 
     transform = transforms.Compose([
@@ -1321,11 +1316,6 @@ if __name__ == '__main__':
                               num_workers=0,
                               batch_sampler=s,
                               collate_fn=general_collate)
-    
-    eval_dataloader = DataLoader(train,
-                                 batch_size=16,
-                                 num_workers=4,
-                                 shuffle=False)
 
     test_dataloader = DataLoader(test,
                               batch_size=16,
@@ -1337,16 +1327,6 @@ if __name__ == '__main__':
                                                         init_method='uniform',
                                                         init_config={'a' : -1/np.power(784, 0.5),
                                                                      'b' :1/np.power(784, 0.5)}
-                                                        ),
-                          trainables.BatchLinear(N_NETWORKS, N_HID, N_HID,
-                                                        init_method='uniform',
-                                                        init_config={'a' : -1/np.power(100, 0.5),
-                                                                     'b' : 1/np.power(100, 0.5)}
-                                                        ),
-                          trainables.BatchLinear(N_NETWORKS, N_HID, N_HID,
-                                                        init_method='uniform',
-                                                        init_config={'a' : -1/np.power(100, 0.5),
-                                                                     'b' : 1/np.power(100, 0.5)}
                                                         ),
                           trainables.BatchLinear(N_NETWORKS, N_HID, N_OUT,
                                                         init_method='uniform',
@@ -1376,7 +1356,7 @@ if __name__ == '__main__':
                 interceptors.EnergyMetricTracker(1.0, initial_param_provider, mode='minimum_energy', granularity='network', components=['total', 'weight', 'bias']),
                 interceptors.EnergyMetricTracker(1.0, initial_param_provider, mode='minimum_energy', granularity='layerwise', components=['total', 'weight', 'bias']),
                 interceptors.EnergyMetricTracker(1.0, initial_param_provider, mode='minimum_energy', granularity='neuronwise', components=['weight', 'bias'], energy_direction=['outgoing', 'incoming']),
-                interceptors.MistakeReplay(remember_mistakes, train, optimizer, 600, 2, 1, forget=True),
+                interceptors.MistakeReplay(remember_mistakes, train, optimizer, 60_000, 2, 1, forget=True),
                 interceptors.TestLoop('test', 
                                    test_dataloader, 
                                    criterions={'MSELoss' : criterion},
@@ -1384,7 +1364,62 @@ if __name__ == '__main__':
                 # interceptors.WeightStatsTracker(['weights', 'gradients'], 
                 #                                 stats_to_track=['mean', 'std', 'max', 'min', 'norm'],
                 #                                 granularity='global'),
+                interceptors.ResultPrinter({'time_taken' : True, 
+                                            'test_accuracies' : True,
+                                            'test_losses' : ['MSELoss'],
+                                            'energies_l1.0_network' : ['total']})]
+    trainer = trainers.Trainer(model, 
+                               N_NETWORKS, 
+                               optimizer, 
+                               criterion, 
+                               train_dataloader, 
+                               test_dataloader, 
+                               trackers=trackers, 
+                               device=DEVICE)
+    trainer.train_loop(2.0, 0.05)
+    
+    model = nn.Sequential(trainables.BatchLinear(N_NETWORKS, N_IN, N_HID, 
+                                                        activation=nn.GELU(),
+                                                        init_method='uniform',
+                                                        init_config={'a' : -1/np.power(784, 0.5),
+                                                                     'b' :1/np.power(784, 0.5)}
+                                                        ),
+                          trainables.BatchLinear(N_NETWORKS, N_HID, N_OUT,
+                                                        init_method='uniform',
+                                                        init_config={'a' : -1/np.power(100, 0.5),
+                                                                     'b' : 1/np.power(100, 0.5)}
+                                                        ),
+                          ).to(DEVICE)
+    
+    optimizer = batch_optimizers.SGD(model.parameters(), lr=LR)
+    replay_optimizer = batch_optimizers.SGD(model.parameters(), lr=0.01*16)
+    
+    criterion = batch_losses.HingeLoss(margin=0.1)
+    
+    previous_param_provider = interceptors.PreviousParameterProvider()
+    initial_param_provider = interceptors.InitialParameterProvider()
+    remember_mistakes = interceptors.RememberMistakes(60_000)
+    trackers = [interceptors.Timer(),
+                interceptors.EpochCounter(60_000),
+                interceptors.ForwardPassCounter(),
                 interceptors.BackwardPassCounter(),
+                #remember_mistakes,
+                previous_param_provider,
+                initial_param_provider,
+                interceptors.EnergyMetricTracker(1.0, previous_param_provider, mode='energy', granularity='network', components=['total', 'weight', 'bias']),
+                interceptors.EnergyMetricTracker(1.0, previous_param_provider, mode='energy', granularity='layerwise', components=['total', 'weight', 'bias']),
+                interceptors.EnergyMetricTracker(1.0, previous_param_provider, mode='energy', granularity='neuronwise', components=['weight', 'bias'], energy_direction=['outgoing', 'incoming']),
+                interceptors.EnergyMetricTracker(1.0, initial_param_provider, mode='minimum_energy', granularity='network', components=['total', 'weight', 'bias']),
+                interceptors.EnergyMetricTracker(1.0, initial_param_provider, mode='minimum_energy', granularity='layerwise', components=['total', 'weight', 'bias']),
+                interceptors.EnergyMetricTracker(1.0, initial_param_provider, mode='minimum_energy', granularity='neuronwise', components=['weight', 'bias'], energy_direction=['outgoing', 'incoming']),
+                #interceptors.MistakeReplay(remember_mistakes, train, optimizer, 6000, 2, 1, forget=True),
+                interceptors.TestLoop('test', 
+                                   test_dataloader, 
+                                   criterions={'MSELoss' : criterion},
+                                   track_accuracy=True),
+                # interceptors.WeightStatsTracker(['weights', 'gradients'], 
+                #                                 stats_to_track=['mean', 'std', 'max', 'min', 'norm'],
+                #                                 granularity='global'),
                 interceptors.ResultPrinter({'time_taken' : True, 
                                             'test_accuracies' : True,
                                             'test_losses' : ['MSELoss'],
@@ -1397,6 +1432,6 @@ if __name__ == '__main__':
                                test_dataloader, 
                                trackers=trackers, 
                                device=DEVICE)
-    trainer2.train_loop(0.05, 0.005)
+    trainer2.train_loop(2.0, 0.05)
     
     
