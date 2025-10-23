@@ -1682,7 +1682,7 @@ if __name__ == '__main__':
     plt.yscale('log')
     plt.show()
     
-    thr = 80
+    thr = 83
     x = p
     y = utils.pluck_masked_values(
         utils.moving_mean(np.array(t2.state['data']['test_accuracies']), 5), 

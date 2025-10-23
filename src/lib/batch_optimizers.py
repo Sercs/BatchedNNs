@@ -592,7 +592,7 @@ class LazyAdamW(BatchOptimizer):
         bias_correction2 = 1.0 - beta2.pow(step)
 
         # This line is correct: denom = sqrt(v_hat_t) + eps
-        denom = exp_avg_sq.sqrt().div_(bias_correction2.sqrt_()).add_(eps) 
+        denom = exp_avg_sq.sqrt().div_(bias_correction2.sqrt()).add_(eps) 
 
 
         update = exp_avg.div(bias_correction1)
