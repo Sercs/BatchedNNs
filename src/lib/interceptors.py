@@ -438,6 +438,7 @@ class RememberMistakes(Interceptor):
         if not isinstance(max_samples, int) or max_samples <= 0:
             raise ValueError("max_samples must be a positive integer.")
         self.max_samples = max_samples
+        self.forget = forget
 
     def before_train(self, state):
         n_networks = state['n_networks']
@@ -466,6 +467,8 @@ class RememberMistakes(Interceptor):
             (idx[update_coords], update_coords[1]),
             torch.tensor(1, device='cpu')
         )
+        if self.forget:
+            self.forget_samples(state['y_hat'], state['y'], state['idx'], state['padding_value'])
 
     def after_train(self, state):
         state['data']['remember_samples'] = self.remember_samples.clone().numpy()

@@ -593,7 +593,6 @@ class HardMiningSampler(Sampler):
 
                 batch_normal = transposed_indices[start:end, stream_idx].tolist()
                 
-
                 num_hard_needed = self.hard_samples_per_batch[stream_idx].item()
                 batch_hard = []
                 if num_hard_needed > 0:

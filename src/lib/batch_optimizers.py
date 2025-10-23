@@ -384,17 +384,20 @@ class SGD(BatchOptimizer):
         super().__init__(params, defaults)
      
     def _prepare_params(self, p, param_state, group):
-        super()._prepare_params(p, param_state, group)
-        momentum = param_state.get('momentum_prepared', 0.0)
-        param_state['use_momentum'] = (isinstance(momentum, float) and momentum > 0.0) or \
-                                     (isinstance(momentum, torch.Tensor) and (momentum > 0.0).any())
-
-        if param_state['use_momentum'] and 'momentum_buffer' not in param_state:
-            param_state['momentum_buffer'] = torch.zeros_like(p).detach()
+        if 'use_momentum' not in param_state:
+            super()._prepare_params(p, param_state, group)
+            momentum = param_state.get('momentum_prepared', 0.0)
+            param_state['use_momentum'] = (isinstance(momentum, float) and momentum > 0.0) or \
+                                         (isinstance(momentum, torch.Tensor) and (momentum > 0.0).any())
+    
+            if param_state['use_momentum'] and 'momentum_buffer' not in param_state:
+                param_state['momentum_buffer'] = torch.zeros_like(p).detach()
             
     def _get_updates_for_param(self, p, param_state, group):
+        self._prepare_params(p, param_state, group)
         lr = param_state['lr_prepared']
         grad = p.grad
+        
         
         grad_update = grad # make the update agnostic to momentum or not
         
@@ -458,11 +461,19 @@ class AdamW(BatchOptimizer):
         bias_correction1 = 1.0 - beta1.pow(step)
         bias_correction2 = 1.0 - beta2.pow(step)
 
-        denom = exp_avg_sq.sqrt().div_(bias_correction2.sqrt_()).add_(eps) # Using sqrt for stability
-        update = exp_avg.div_(denom).mul_(-lr).div_(bias_correction1)
+        # This line is correct: denom = sqrt(v_hat_t) + eps
+        denom = exp_avg_sq.sqrt().div_(bias_correction2.sqrt_()).add_(eps) 
+
+
+        update = exp_avg.div(bias_correction1)
+    
+        update.div_(denom)
+
+
+        update.mul_(-lr)
+
         return update
 
-    # inherits apply update
 
 class AdamP(BatchOptimizer):
     """
@@ -515,8 +526,16 @@ class AdamP(BatchOptimizer):
         bias_correction1 = 1.0 - beta1.pow(step)
         bias_correction2 = 1.0 - beta2.pow(step)
 
-        denom = exp_avg_sq.div(bias_correction2).pow(1.0 / degree).add_(eps)
-        update = exp_avg.div_(denom).mul_(-lr).div_(bias_correction1)
+        # This line is correct: denom = sqrt(v_hat_t) + eps
+        denom = exp_avg_sq.sqrt().div_(bias_correction2.sqrt_()).add_(eps) 
+
+        update = exp_avg.div(bias_correction1)
+    
+        update.div_(denom)
+
+
+        update.mul_(-lr)
+
         return update
     
     # inherits apply update
@@ -539,7 +558,7 @@ class LazyAdamW(BatchOptimizer):
         super()._prepare_params(p, param_state, group)
 
         if 'step' not in param_state:
-            param_state['step'] = 0
+            param_state['step'] = torch.zeros_like(p).detach()
             param_state['exp_avg'] = torch.zeros_like(p).detach()
             param_state['exp_avg_sq'] = torch.zeros_like(p).detach()
 
@@ -556,11 +575,11 @@ class LazyAdamW(BatchOptimizer):
         beta2 = param_state['beta2_prepared']
         weight_decay = param_state['weight_decay_prepared']
         eps = group['eps']
-
-        param_state['step'] += 1
-        step = param_state['step']
-
+        
         update_needed_mask = (grad.sum(dim=tuple(range(1, p.ndim))) != 0).view(-1, *[1] * (p.ndim - 1)).float()
+
+        param_state['step'] += update_needed_mask
+        step = param_state['step']
         
         if not (isinstance(weight_decay, float) and weight_decay == 0.0):
             wd_term = 1.0 - lr * weight_decay * update_needed_mask
@@ -572,9 +591,84 @@ class LazyAdamW(BatchOptimizer):
         bias_correction1 = 1.0 - beta1.pow(step)
         bias_correction2 = 1.0 - beta2.pow(step)
 
-        denom = exp_avg_sq.sqrt().div_(bias_correction2.sqrt_()).add_(eps)
-        update = exp_avg.div_(denom).mul_(-lr).div_(bias_correction1)
+        # This line is correct: denom = sqrt(v_hat_t) + eps
+        denom = exp_avg_sq.sqrt().div_(bias_correction2.sqrt_()).add_(eps) 
+
+
+        update = exp_avg.div(bias_correction1)
+    
+        update.div_(denom)
+
+
+        update.mul_(-lr)
+
+        return update
+    
+class LazyAdamP(BatchOptimizer):
+    """
+    Implements a refactored AdamP-like optimizer (Generalized Adam) 
+    subclassing BatchOptimizer.
+
+    Supports broadcasting of learning rate, betas, degree, and weight decay.
+    """
+    def __init__(self, params, lr=1e-3, beta1=0.9, beta2=0.999, degree=2.0,
+                 weight_decay=0.0, eps=1e-8):
+        defaults = dict(lr=lr, beta1=beta1, beta2=beta2,
+                        degree=degree, weight_decay=weight_decay, eps=eps)
+
+        super().__init__(params, defaults)
+
+    def _prepare_params(self, p, param_state, group):
+        super()._prepare_params(p, param_state, group)
+
+        if 'step' not in param_state:
+            param_state['step'] = 0
+            param_state['exp_avg'] = torch.zeros_like(p).detach()
+            param_state['exp_avg_sq'] = torch.zeros_like(p).detach()
+
+    def _get_updates_for_param(self, p, param_state, group):
+        self._prepare_params(p, param_state, group)
+
+        exp_avg = param_state['exp_avg']
+        exp_avg_sq = param_state['exp_avg_sq']
+        grad = p.grad
+        
+        lr = param_state['lr_prepared']
+        beta1 = param_state['beta1_prepared']
+        beta2 = param_state['beta2_prepared']
+        weight_decay = param_state['weight_decay_prepared']
+        degree = param_state['degree_prepared']
+        eps = group['eps']
+
+        update_needed_mask = (grad.sum(dim=tuple(range(1, p.ndim))) != 0).view(-1, *[1] * (p.ndim - 1)).float()
+
+        param_state['step'] += update_needed_mask
+        step = param_state['step']
+        
+        if not (isinstance(weight_decay, float) and weight_decay == 0.0):
+            wd_term = 1.0 - lr * weight_decay * update_needed_mask
+            p.data.mul_(wd_term)
+
+        exp_avg.mul_(beta1).addcmul_(grad, (1 - beta1), value=1.0)
+
+        grad_pow = torch.pow(grad.abs(), degree)
+        exp_avg_sq.mul_(beta2).addcmul_(grad_pow, (1.0 - beta2), value=1.0) 
+
+        bias_correction1 = 1.0 - beta1.pow(step)
+        bias_correction2 = 1.0 - beta2.pow(step)
+
+        # This line is correct: denom = sqrt(v_hat_t) + eps
+        denom = exp_avg_sq.sqrt().div_(bias_correction2.sqrt_()).add_(eps) 
+
+
+        update = exp_avg.div(bias_correction1)
+    
+        update.div_(denom)
+
+
+        update.mul_(-lr)
         update.mul_(update_needed_mask)
+
         return update
 
 class LazySGD(BatchOptimizer):

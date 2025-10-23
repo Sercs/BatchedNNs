@@ -1276,8 +1276,8 @@ def recur_test():
 #       f"Ungrouped Params. Time: {ungrouped_time}\n" +
 #       f"Speed up: {grouped_time/ungrouped_time:.2f}x")
 
-#def test_two():
-if __name__ == '__main__':
+def test_two():
+#if __name__ == '__main__':
     DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
     N_NETWORKS = 10
     BATCH_SIZE = 1
@@ -1433,5 +1433,271 @@ if __name__ == '__main__':
                                trackers=trackers, 
                                device=DEVICE)
     trainer2.train_loop(2.0, 0.05)
+    
+#def HingeAdam():
+if __name__ == '__main__':
+    DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+    print(DEVICE)
+    
+    
+    N_NETWORKS = 50
+    N_NETWORKS2 = N_NETWORKS
+    N_IN = 784
+    N_HID = 100
+    N_OUT = 10
+    ACTIVATION_FUNCTION = 'gelu'
+    
+    INIT_RANGE1 = 1/np.sqrt(784)
+    INIT_RANGE2 = 1/np.sqrt(N_HID)
+    INIT_RANGE = [INIT_RANGE1, INIT_RANGE2]
+    
+    DATASET = 'MNIST'
+    NORMALIZED = 'True'
+    N_EPOCHS = 0.2
+    TEST_INTERVAL = 0.01
+    BATCH_SIZE = 1
+    TEST_BATCH_SIZE = 256
+    MARGIN = 1.0
+    
+    NAME = 'MNIST_OPTIMIZATION_AdamW'
+    
+    LR = 0.00001
+    BETA1 = 1-np.logspace(np.log10(0.1), np.log10(0.001), N_NETWORKS)
+    BETA2 = 0.9999
+    p = np.linspace(0.75, 3, N_NETWORKS)
+    
+    LOSS = 'HingeLoss'
+    OPTIM = 'AdamW'
+
+    experimental_setup ={'n_networks' : N_NETWORKS,
+                         'n_in' : N_IN,
+                         'n_hid' : N_HID,
+                         'n_out' : N_OUT,
+                         'activation_function' : ACTIVATION_FUNCTION,
+                         'init_range' : INIT_RANGE,
+                         'loss' : LOSS,
+                         'optimizer' : OPTIM,
+                         'lr' : LR,
+                         'dataset' : DATASET,
+                         'normalized' : NORMALIZED,
+                         'test_margin' : MARGIN,
+                         'n_epochs' : N_EPOCHS,
+                         'test_interval' : TEST_INTERVAL}
+    
+    transform = transforms.Compose([
+        transforms.ToTensor(),
+        transforms.Normalize((0.1307,), (0.3081,))
+    ])
+    
+    train_dataset = datasets.MNIST(root='datasets',
+                                #split='digits', # used as a quick swap for EMNIST
+                                train=True,
+                                download=True,
+                                transform=transform, # automatically coverts 0 - 255 --> 0 - 1
+                                target_transform=dm.temp_onehot)
+    test_dataset = datasets.MNIST(root='datasets',
+                                #split='digits', # used as a quick swap for EMNIST
+                                train=False,
+                                download=True,
+                                transform=transform, # automatically coverts 0 - 255 --> 0 - 1
+                                target_transform=dm.temp_onehot)
+    
+    train = dm.DatasetWithIdx(train_dataset, task='classify')
+    test = dm.DatasetWithIdx(test_dataset, task='classify')
+    
+    s=samplers.RandomSampler(train, N_NETWORKS, BATCH_SIZE)
+    general_collate = samplers.collate_fn(N_NETWORKS) # used to provide samples as expected for training (x, y, idx)
+                                                      # tracking indices is non-standard default PyTorch
+    
+    train_dataloader = DataLoader(train,
+                                num_workers=0,
+                                batch_sampler=s, # required
+                                collate_fn=general_collate) # required
+    
+    traineval_dataloader = DataLoader(train,
+                                num_workers=0,
+                                batch_size=64,
+                                shuffle=False)
+    
+    test_dataloader = DataLoader(test,
+                                batch_size=64,
+                                num_workers=0,
+                                shuffle=False)
+    
+    model = nn.Sequential(trainables.BatchLinear(N_NETWORKS, N_IN, N_HID,
+                                                        activation=nn.GELU(),
+                                                        init_method='uniform',
+                                                        init_config={'a' : -INIT_RANGE[0],   # lower bound (also works with lists)
+                                                                     'b' : INIT_RANGE[0]}),  # higher bound
+                            trainables.BatchLinear(N_NETWORKS, N_HID, N_OUT,
+                                                        init_method='uniform',
+                                                        init_config={'a' : -INIT_RANGE[1],
+                                                                     'b' : INIT_RANGE[1]})
+                            ).to(DEVICE)
+    
+    optimizer = batch_optimizers.SGD(model.parameters(),
+                                     lr=LR,
+                                     momentum=BETA1)
+    criterion1 = batch_losses.CrossEntropyLoss()
+    
+    initial_param_provider = interceptors.InitialParameterProvider()
+    previous_param_provider = interceptors.PreviousParameterProvider()
+    
+    trackers = [interceptors.Timer(),
+                interceptors.EpochCounter(60_000),
+                interceptors.ForwardPassCounter(),
+                interceptors.BackwardPassCounter(),
+                previous_param_provider,
+                initial_param_provider,
+                interceptors.WeightStatsTracker(tensors_to_track=['weights', 'gradients'], stats_to_track=['min', 'mean', 'max', 'std', 'norm'], granularity='layerwise'),
+                interceptors.EnergyMetricTracker(1, previous_param_provider, mode='energy', granularity='network', components=['total', 'weight', 'bias']), # L1
+                interceptors.EnergyMetricTracker(0, previous_param_provider, mode='energy', granularity='network', components=['total', 'weight', 'bias']), # L0
+                interceptors.EnergyMetricTracker(1, initial_param_provider, mode='minimum_energy', granularity='network', components=['total', 'weight', 'bias']), # L1_min
+                interceptors.EnergyMetricTracker(0, initial_param_provider, mode='minimum_energy', granularity='network', components=['total', 'weight', 'bias']), # L0_min
+                interceptors.EnergyMetricTracker(1, previous_param_provider, mode='energy', granularity='layerwise', components=['total', 'weight', 'bias']), # L1
+                interceptors.EnergyMetricTracker(0, previous_param_provider, mode='energy', granularity='layerwise', components=['total', 'weight', 'bias']), # L0
+                interceptors.EnergyMetricTracker(1, initial_param_provider, mode='minimum_energy', granularity='layerwise', components=['total', 'weight', 'bias']), # L1_min
+                interceptors.EnergyMetricTracker(0, initial_param_provider, mode='minimum_energy', granularity='layerwise', components=['total', 'weight', 'bias']), # L0_min
+                interceptors.TestLoop('test',
+                                    test_dataloader,
+                                    criterions = {'MSELoss' : batch_losses.MSELoss(),
+                                                  'HingeLoss' : batch_losses.HingeLoss(margin=MARGIN)},
+                                    track_accuracy=True),
+                interceptors.ResultPrinter({'time_taken' : True,
+                                'test_accuracies' : True,
+                                'energies_l1_network' : ['total'],
+                                'func' : {'min' : np.min,
+                                        'mean' : np.mean,
+                                        'max' : np.max}})]
+    
+    s=time.time()
+    t = trainers.Trainer(model,
+                                N_NETWORKS,
+                                optimizer,
+                                criterion1,
+                                train_dataloader,
+                                test_dataloader,
+                                trackers=trackers,
+                                device=DEVICE)
+    t.train_loop(N_EPOCHS, TEST_INTERVAL)
+    # t.save_data_as_json(file_path+file_name,
+    #                     experimental_setup=experimental_setup)
+    palette = plt.get_cmap('Blues_r', N_NETWORKS)
+    for i in range(len(np.array(t.state['data']['test_accuracies']).T)):
+        plt.plot(np.array(t.state['data']['test_accuracies']).T[i],
+                 np.array(t.state['data']['energies_l1_network']['total']).T[i], color=palette(i))
+    plt.yscale('log')
+    t.cleanup()
+        
+    N_NETWORKS = N_NETWORKS
+    s=samplers.RandomSampler(train, N_NETWORKS, BATCH_SIZE)
+    general_collate = samplers.collate_fn(N_NETWORKS) # used to provide samples as expected for training (x, y, idx)
+                                                      # tracking indices is non-standard default PyTorch
+    
+    train_dataloader = DataLoader(train,
+                                num_workers=0,
+                                batch_sampler=s, # required
+                                collate_fn=general_collate) # required
+    
+    traineval_dataloader = DataLoader(train,
+                                num_workers=0,
+                                batch_size=64,
+                                shuffle=False)
+    
+    test_dataloader = DataLoader(test,
+                                batch_size=64,
+                                num_workers=0,
+                                shuffle=False)
+    model = nn.Sequential(trainables.BatchLinear(N_NETWORKS, N_IN, N_HID,
+                                                        activation=nn.GELU(),
+                                                        init_method='uniform',
+                                                        init_config={'a' : -INIT_RANGE[0],   # lower bound (also works with lists)
+                                                                     'b' : INIT_RANGE[0]}),  # higher bound
+                            trainables.BatchLinear(N_NETWORKS, N_HID, N_OUT,
+                                                        init_method='uniform',
+                                                        init_config={'a' : -INIT_RANGE[1],
+                                                                     'b' : INIT_RANGE[1]})
+                            ).to(DEVICE)
+    
+    optimizer = batch_optimizers.SGD(model.parameters(),
+                                     lr=LR,
+                                     momentum=BETA1)
+    criterion1 = batch_losses.HingeLoss(margin=0.1)
+    
+    initial_param_provider = interceptors.InitialParameterProvider()
+    previous_param_provider = interceptors.PreviousParameterProvider()
+    
+    trackers = [interceptors.Timer(),
+                interceptors.EpochCounter(60_000),
+                interceptors.ForwardPassCounter(),
+                interceptors.BackwardPassCounter(),
+                previous_param_provider,
+                initial_param_provider,
+                interceptors.WeightStatsTracker(tensors_to_track=['weights', 'gradients'], stats_to_track=['min', 'mean', 'max', 'std', 'norm'], granularity='layerwise'),
+                interceptors.EnergyMetricTracker(1, previous_param_provider, mode='energy', granularity='network', components=['total', 'weight', 'bias']), # L1
+                interceptors.EnergyMetricTracker(0, previous_param_provider, mode='energy', granularity='network', components=['total', 'weight', 'bias']), # L0
+                interceptors.EnergyMetricTracker(1, initial_param_provider, mode='minimum_energy', granularity='network', components=['total', 'weight', 'bias']), # L1_min
+                interceptors.EnergyMetricTracker(0, initial_param_provider, mode='minimum_energy', granularity='network', components=['total', 'weight', 'bias']), # L0_min
+                interceptors.EnergyMetricTracker(1, previous_param_provider, mode='energy', granularity='layerwise', components=['total', 'weight', 'bias']), # L1
+                interceptors.EnergyMetricTracker(0, previous_param_provider, mode='energy', granularity='layerwise', components=['total', 'weight', 'bias']), # L0
+                interceptors.EnergyMetricTracker(1, initial_param_provider, mode='minimum_energy', granularity='layerwise', components=['total', 'weight', 'bias']), # L1_min
+                interceptors.EnergyMetricTracker(0, initial_param_provider, mode='minimum_energy', granularity='layerwise', components=['total', 'weight', 'bias']), # L0_min
+                interceptors.TestLoop('test',
+                                    test_dataloader,
+                                    criterions = {'MSELoss' : batch_losses.MSELoss(),
+                                                  'HingeLoss' : batch_losses.HingeLoss(margin=MARGIN)},
+                                    track_accuracy=True),
+                interceptors.ResultPrinter({'time_taken' : True,
+                                'test_accuracies' : True,
+                                'energies_l1_network' : ['total'],
+                                'func' : {'min' : np.min,
+                                        'mean' : np.mean,
+                                        'max' : np.max}})]
+    
+    s=time.time()
+    t2 = trainers.Trainer(model,
+                                N_NETWORKS,
+                                optimizer,
+                                criterion1,
+                                train_dataloader,
+                                test_dataloader,
+                                trackers=trackers,
+                                device=DEVICE)
+    t2.train_loop(N_EPOCHS, TEST_INTERVAL)
+    lines = []
+    palette = plt.get_cmap('Blues_r', N_NETWORKS2+1)
+    for i in range(len(np.array(t.state['data']['test_accuracies']).T)):
+        plt.plot(np.array(t.state['data']['test_accuracies']).T[i],
+                 np.array(t.state['data']['energies_l1_network']['total']).T[i], color=palette(i))
+    palette = plt.get_cmap('Reds_r', N_NETWORKS2+1)
+    for i in range(len(np.array(t.state['data']['test_accuracies']).T)):
+        line, = plt.plot(np.array(t.state['data']['test_accuracies']).T[i],
+                 np.array(t.state['data']['energies_l1_network']['total']).T[i], color=palette(i))
+        lines.append(line)
+    # labels = [str(i) for i in p]
+    # legend = plt.legend(handles=lines, labels=labels)
+    # for line in legend.get_lines():
+    #     line.set_linewidth(3)
+    plt.ylim([1, 1000])
+    plt.yscale('log')
+    plt.show()
+    
+    thr = 80
+    x = p
+    y = utils.pluck_masked_values(
+        utils.moving_mean(np.array(t2.state['data']['test_accuracies']), 5), 
+                          np.array(t2.state['data']['energies_l1_network']['total']),
+                            lambda x : x > thr)
+    plt.plot(x, y)
+
+    x = p
+    y = utils.pluck_masked_values(
+        utils.moving_mean(np.array(t.state['data']['test_accuracies']), 5), 
+                          np.array(t.state['data']['energies_l1_network']['total']),
+                            lambda x : x > thr)
+    plt.plot(x, y)
+
+        
+    
     
     
