@@ -246,7 +246,6 @@ class Competitive(torch.optim.Optimizer):
         This new helper function contains the core logic for all competition modes.
         """
         num_w_to_keep = competitive_state['num_w_to_keep']
-        
         if self.competition_mode == 'neuron_wise_weight':
 
             batch_size, out_features, in_features = p.shape
@@ -687,7 +686,7 @@ class LazySGD(BatchOptimizer):
         momentum = param_state.get('momentum_prepared', 0.0)
         param_state['use_momentum'] = (isinstance(momentum, float) and momentum > 0.0) or \
                                      (isinstance(momentum, torch.Tensor) and (momentum > 0.0).any())
-        print(param_state['use_momentum'])
+        #print(param_state['use_momentum'])
 
         if param_state['use_momentum'] and 'momentum_buffer' not in param_state:
             param_state['momentum_buffer'] = torch.zeros_like(p).detach()

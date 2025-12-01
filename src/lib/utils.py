@@ -4,6 +4,19 @@ import json
 import os
 
 # Gemini-2.5 Pro
+def get_nested(self, dictionary, path):
+    """Safely retrieves v['tracked_data']['...'] using dot notation."""
+    keys = path.split('.')
+    val = dictionary
+    try:
+        for k in keys:
+            val = val[k]
+        return val
+    except KeyError:
+        if self.verbose: print(f"Warning: Key '{path}' not found.")
+        return None
+
+# Gemini-2.5 Pro
 def pluck_masked_values(search_array, # filter items against
                         return_array, # pull items from
                         condition_func,  # filter to apply 

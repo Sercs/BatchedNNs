@@ -80,13 +80,68 @@ class Handler:
     def before_step_log(self, state=None): pass
     def after_step_log(self, state=None): pass
 
+# Gemini (with full-context of observers)
+class ActiveMemoryFractionTracker(Interceptor):
+    """
+    Tracks the 'Active Set' fraction (M/N): The proportion of the dataset 
+    that the model has effectively 'remembered' (trained on).
+    
+    This corresponds to the Y-axis of the Scaling Law plot:
+        y = (Samples with > 0 updates) / (Total Dataset Size)
+        
+    Prerequisites:
+        - Must be placed AFTER 'PerSampleBackwardCounter' in the interceptor list.
+    """
+    def __init__(self, dataset_sizes):
+        super().__init__()
+        # Handle scalar, list, or numpy array inputs for dataset_sizes
+        if isinstance(dataset_sizes, (int, float)):
+            self.dataset_sizes = float(dataset_sizes)
+        else:
+            self.dataset_sizes = torch.as_tensor(dataset_sizes, dtype=torch.float32)
+
+    def before_train(self, state):
+        # Ensure dataset_sizes is on the correct device for tensor operations
+        if torch.is_tensor(self.dataset_sizes):
+            self.dataset_sizes = self.dataset_sizes.to(state['device'])
+            
+        state['data']['active_memory_fraction'] = []
+
+    def after_test(self, state):
+        # 1. Retrieve the raw counts from the counter interceptor
+        # Note: We access the tensor directly from the object if possible, 
+        # otherwise we look in state['data'] (which might be numpyified already)
+        counts = state.get('per_sample_backward_counts') # usually reference to tensor via PerSampleBackwardCounter
+        
+        # If it's already converted to numpy (e.g. at very end of training), handle that
+        if isinstance(counts, np.ndarray):
+            counts = torch.from_numpy(counts).to(state['device'])
+            
+        if counts is None:
+            # Fallback if PerSampleBackwardCounter isn't running
+            state['data']['active_memory_fraction'].append(np.zeros(state['n_networks']))
+            return
+
+        # 2. Calculate M (The Active Set Size)
+        # Sum boolean mask over the sample dimension (dim 0)
+        # Shape: (n_samples, n_networks) -> (n_networks,)
+        active_set_size = (counts > 0).sum(dim=0).float()
+
+        # 3. Calculate M / N (The Fraction)
+        fraction = active_set_size / self.dataset_sizes
+        
+        # 4. Log
+        state['data']['active_memory_fraction'].append(fraction.cpu().numpy())
+
 ############################## TEST LOOP ##################################
 """
 An optional test loop. It expects a name which indicates which test is being done
 (i.e. test loop, train loop, validation loop,etc) and dictionary of criterions with 
 {name of loss function : loss function} so that multiple criterions can be tested
 against.
-""" 
+"""
+
+
 
 class TestLoop(Interceptor):
     """
