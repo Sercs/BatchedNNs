@@ -125,7 +125,7 @@ class ActiveMemoryFractionTracker(Interceptor):
         # 2. Calculate M (The Active Set Size)
         # Sum boolean mask over the sample dimension (dim 0)
         # Shape: (n_samples, n_networks) -> (n_networks,)
-        active_set_size = (counts > 0).sum(dim=0).float()
+        active_set_size = (counts > 0).sum(dim=0).float().to(self.dataset_sizes.device)
 
         # 3. Calculate M / N (The Fraction)
         fraction = active_set_size / self.dataset_sizes
