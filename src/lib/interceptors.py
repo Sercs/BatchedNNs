@@ -111,7 +111,7 @@ class ActiveMemoryFractionTracker(Interceptor):
         # 1. Retrieve the raw counts from the counter interceptor
         # Note: We access the tensor directly from the object if possible, 
         # otherwise we look in state['data'] (which might be numpyified already)
-        counts = state.get('per_sample_backward_counts') # usually reference to tensor via PerSampleBackwardCounter
+        counts = state['data'].get('per_sample_backward_counts') # usually reference to tensor via PerSampleBackwardCounter
         
         # If it's already converted to numpy (e.g. at very end of training), handle that
         if isinstance(counts, np.ndarray):
