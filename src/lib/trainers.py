@@ -115,8 +115,8 @@ class Trainer():
             
         # note that these will be device bound
         self.state['x'], self.state['y'], self.state['idx'] = x, y, idx # useful for data augmentation
-        
         self._fire_event('before_train_forward') # do stuff like data augmentation or idx tracking here
+        x, y, idx = self.state['x'], self.state['y'], self.state['idx']
         y_hat = self.model(x)
         self.state['y_hat'] = y_hat
         # if we get loss here, we can modify it with observers

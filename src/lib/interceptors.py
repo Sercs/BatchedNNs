@@ -8,6 +8,8 @@ from .samplers import FixedEpochSampler as FixedEpochSampler # used in mistake r
 from .samplers import collate_fn as collate_fn # used in mistake replay
 from torch.utils.data import DataLoader # used in mistake replay
 
+from collections import deque
+
 import torch
 import torch.nn as nn
 import numpy as np
@@ -25,21 +27,21 @@ class Interceptor:
         # this will be populated by the Trainer upon initialization.
         self.trainer = None
     # main function listeners
-    def before_train(self, state): pass
-    def after_train(self, state): pass
-    def before_epoch(self, state): pass
-    def after_epoch(self, state): pass
-    def before_test(self, state): pass
-    def on_test_run(self, state): pass
-    def after_test(self, state): pass
-    def before_train_forward(self, state): pass
-    def after_train_forward(self, state): pass
-    def before_test_forward(self, state): pass
-    def after_test_forward(self, state): pass
-    def before_update(self, state): pass
-    def after_update(self, state): pass
-    def before_step(self, state): pass
-    def after_step(self, state): pass
+    def before_train(self, state): pass # called before the first epoch, useful for initialisation
+    def after_train(self, state): pass # called after all epochs, useful for collating records
+    def before_epoch(self, state): pass # called once at the start of an epoch
+    def after_epoch(self, state): pass # called at the end of an epoch
+    def before_test(self, state): pass # we test intermittently, this runs before that test
+    def on_test_run(self, state): pass # this is effectively used in conjunction with a TestLoop interceptor
+    def after_test(self, state): pass # runs after the test, useful for updating current metrics
+    def before_train_forward(self, state): pass # runs before a train forward pass, where state['x'], state['y'] and state['idx'] will be free to manipulate
+    def after_train_forward(self, state): pass # runs after the train forward when the state['loss'] is available to add for instance regularization
+    def before_test_forward(self, state): pass # runs before a test forward (where no updating should occur), distinguishing it from a forward pass 
+    def after_test_forward(self, state): pass # runs after a test forward
+    def before_update(self, state): pass # run before calling into the before the train forward, it means we can make an interceptor run on_update and internally run on_forward_train without it running recursively
+    def after_update(self, state): pass # runs after the whole forward, backward, step, apply update pass
+    def before_step(self, state): pass # runs just before .step() when grads are available
+    def after_step(self, state): pass # runs just after .step(), useful for computing weight changes
     
 """
     Handlers behave like Interceptors, listening for functions to do something.
@@ -80,7 +82,186 @@ class Handler:
     def before_step_log(self, state=None): pass
     def after_step_log(self, state=None): pass
 
-# Gemini (with full-context of observers)
+class HomeostaticSleepReplay(Interceptor):
+    def __init__(self, sample_memorizer, 
+                       data_source, 
+                       optimizer, 
+                       growth_threshold=0.2, 
+                       min_samples_to_trigger=10, 
+                       sleep_epochs=1,       
+                       batch_size=32, 
+                       criterion=None, 
+                       forget=False, 
+                       num_workers=0):
+        super().__init__()
+        self.sample_memorizer = sample_memorizer
+        self.data_source = data_source
+        self.optimizer = optimizer
+        
+        self.growth_threshold = growth_threshold
+        self.min_samples_to_trigger = min_samples_to_trigger
+        self.sleep_epochs = sleep_epochs 
+        self.batch_size = batch_size
+        self.criterion = criterion
+        self.forget = forget
+        self.num_workers = num_workers 
+        
+    def before_train(self, state):
+        n_networks = state['n_networks']
+        device = state['device']
+        
+        # 1. Handle Growth Threshold (Scalar -> Vector)
+        if isinstance(self.growth_threshold, (int, float)):
+            gt_list = [float(self.growth_threshold)] * n_networks
+        else:
+            gt_list = self.growth_threshold
+        self.growth_threshold_tensor = torch.as_tensor(gt_list, device=device, dtype=torch.float32)
+        
+        # 2. Handle Sleep Epochs (Scalar -> Vector)
+        if isinstance(self.sleep_epochs, (int, float)):
+             se_list = [int(self.sleep_epochs)] * n_networks
+        else:
+             se_list = self.sleep_epochs
+        self.sleep_epochs_tensor = torch.as_tensor(se_list, device=device, dtype=torch.long)
+
+        # 3. Initialize Baselines
+        self.last_wake_sizes = torch.ones(n_networks, device=device) * self.min_samples_to_trigger
+        
+        state['data']['sleep_events'] = [] 
+
+    def after_update(self, state):
+        if not hasattr(self.sample_memorizer, 'get_samples'):
+            return
+            
+        # Get mask: (Max_Samples, N_Networks) -> Sum -> (N_Networks,)
+        current_coreset_sizes = self.sample_memorizer.get_samples().sum(dim=0).float().to(state['device'])
+        
+        # Calculate Pressure
+        pressure = current_coreset_sizes / (self.last_wake_sizes + 1e-9)
+        
+        # --- LOGIC UPDATE ---
+        # 1. Check if pressure exceeds threshold
+        trigger_condition = (pressure >= (1.0 + self.growth_threshold_tensor))
+        
+        # 2. Safety Check: Only trigger if threshold > 0. 
+        #    This allows 0.0 to act as a "Disable Replay" (Baseline) setting.
+        is_enabled = (self.growth_threshold_tensor > 0.0)
+        
+        needs_sleep = trigger_condition & is_enabled
+        # --------------------
+
+        if not needs_sleep.any():
+            return
+
+        max_epochs_needed = self.sleep_epochs_tensor[needs_sleep].max().item()
+        criterion = state['criterion'] if self.criterion is None else self.criterion
+        
+        for epoch_step in range(1, max_epochs_needed + 1):
+            
+            # Active if: Needs Sleep AND Epoch count is within budget
+            active_this_loop = (needs_sleep & (epoch_step <= self.sleep_epochs_tensor)).float()
+            
+            if active_this_loop.sum() == 0:
+                break
+            
+            per_sample_backward_counts = self.sample_memorizer.get_samples()
+            
+            idxs_to_replay = [torch.tensor(np.where(n > 0)[0]) if active_this_loop[i] else [] for i, n in enumerate(per_sample_backward_counts.T)]
+            
+            replay_sampler = FixedEpochSampler(self.data_source,
+                                             idxs_to_replay,
+                                             self.batch_size,
+                                             padding_value=state['padding_value'])
+                                             
+            replay_dataloader = DataLoader(self.data_source,
+                                         batch_sampler=replay_sampler,
+                                         collate_fn=collate_fn(state['n_networks']),
+                                         num_workers=self.num_workers,
+                                         shuffle=False)
+            for (x, y, idx) in replay_dataloader:
+                x, y, idx = x.to(state['device']), y.to(state['device']), idx.to(state['device']) 
+                
+                if len(x.shape) < 3:
+                    x = x.unsqueeze(1)
+                    y = y.unsqueeze(1).repeat((1, state['n_networks'], 1))
+                    idx = idx.unsqueeze(1).repeat(1, state['n_networks'])   
+                
+                state['x'], state['y'], state['idx'] = x, y, idx
+                
+                self.trainer._fire_event('before_update') 
+                self.trainer._fire_event('before_train_forward')
+                
+                y_hat = state['model'](x)
+                self.optimizer.zero_grad()
+                
+                per_sample_supervised_loss = criterion(y_hat, y, idx, state['padding_value'])
+                state['per_sample_losses'] = per_sample_supervised_loss
+                active_mask = active_this_loop.unsqueeze(0)
+                mask = (idx != state['padding_value'])
+                n_valid_samples = mask.sum(0)
+                
+                supervised_loss = (per_sample_supervised_loss.sum(0) * active_mask) / (n_valid_samples + 1e-12)
+                state['loss'] = supervised_loss
+                
+                self.trainer._fire_event('after_train_forward')
+                                      
+                supervised_loss.sum().backward()
+                
+                self.trainer._fire_event('before_step')
+                self.optimizer.step()
+                self.trainer._fire_event('after_step')
+                
+                if self.forget:
+                     self.sample_memorizer.forget_samples(y_hat, y, idx, state['padding_value'])
+
+        # Update baselines for those that slept
+        self.last_wake_sizes[needs_sleep] = current_coreset_sizes[needs_sleep]
+        
+        state['data']['sleep_events'].append({
+            'step': state['step'],
+            'slept_mask': needs_sleep.cpu().numpy(),
+            'new_baselines': self.last_wake_sizes.cpu().numpy()
+        })
+        
+class ActiveMemorySizeTracker(Interceptor):
+    """
+    Tracks the 'Active Set' Size (M): The absolute number of unique samples 
+    that the model has effectively 'remembered' (trained on).
+    
+    This corresponds to the numerator of the Scaling Law ratio.
+    
+    Prerequisites:
+        - Must be placed AFTER 'PerSampleBackwardCounter' in the interceptor list.
+    """
+    def __init__(self):
+        super().__init__()
+
+    def before_train(self, state):
+        # Initialize the log list
+        state['data']['active_memory_size'] = []
+
+    def after_test(self, state):
+        counts = state['data'].get('per_sample_backward_counts')
+        
+        # 1. Fallback if counter isn't present
+        if counts is None:
+            state['data']['active_memory_size'].append(np.zeros(state['n_networks']))
+            return
+
+        # 2. Ensure tensor format
+        if isinstance(counts, np.ndarray):
+            counts = torch.from_numpy(counts)
+            
+        # 3. Calculate M (Active Set Size)
+        # Sum boolean mask over samples (dim 0) -> Shape: (n_networks,)
+        # We perform this on the same device as 'counts' to avoid unnecessary transfers
+        active_set_size = (counts > 0).sum(dim=0).float()
+        
+        # 4. Log
+        # Move to CPU/Numpy for storage
+        state['data']['active_memory_size'].append(active_set_size.cpu().numpy())
+
+# gemini pro 2.5
 class ActiveMemoryFractionTracker(Interceptor):
     """
     Tracks the 'Active Set' fraction (M/N): The proportion of the dataset 
@@ -96,7 +277,7 @@ class ActiveMemoryFractionTracker(Interceptor):
         super().__init__()
         # Handle scalar, list, or numpy array inputs for dataset_sizes
         if isinstance(dataset_sizes, (int, float)):
-            self.dataset_sizes = float(dataset_sizes)
+            self.dataset_sizes = torch.as_tensor(dataset_sizes, dtype=torch.float32)
         else:
             self.dataset_sizes = torch.as_tensor(dataset_sizes, dtype=torch.float32)
 
@@ -108,30 +289,252 @@ class ActiveMemoryFractionTracker(Interceptor):
         state['data']['active_memory_fraction'] = []
 
     def after_test(self, state):
-        # 1. Retrieve the raw counts from the counter interceptor
-        # Note: We access the tensor directly from the object if possible, 
-        # otherwise we look in state['data'] (which might be numpyified already)
-        counts = state['data'].get('per_sample_backward_counts') # usually reference to tensor via PerSampleBackwardCounter
+        counts = state['data'].get('per_sample_backward_counts')
         
-        # If it's already converted to numpy (e.g. at very end of training), handle that
-        if isinstance(counts, np.ndarray):
-            counts = torch.from_numpy(counts).to(state['device'])
+        # --- FIX: Fetch the current N_env from the dedicated tracker ---
+        unique_seen_list = state['data'].get('unique_samples_seen')
+        if not unique_seen_list:
+            # If the seen tracker hasn't logged anything, N_env = 1 (or skip)
+            N_env = torch.tensor(1.0, dtype=torch.float32).to(self.dataset_sizes.device) 
+        else:
+            # Get the scalar count (last logged value)
+            N_env_scalar = unique_seen_list[-1]
+            N_env = torch.tensor(N_env_scalar, dtype=torch.float32).to(self.dataset_sizes.device)
             
         if counts is None:
-            # Fallback if PerSampleBackwardCounter isn't running
+            # Fallback
             state['data']['active_memory_fraction'].append(np.zeros(state['n_networks']))
             return
 
-        # 2. Calculate M (The Active Set Size)
-        # Sum boolean mask over the sample dimension (dim 0)
-        # Shape: (n_samples, n_networks) -> (n_networks,)
-        active_set_size = (counts > 0).sum(dim=0).float().to(self.dataset_sizes.device)
-
-        # 3. Calculate M / N (The Fraction)
-        fraction = active_set_size / self.dataset_sizes
+        if isinstance(counts, np.ndarray):
+            counts = torch.from_numpy(counts)
+            
+        # 1. Calculate M (Active Set Size)
+        # Sum boolean mask over samples (dim 0) 
+        active_set_size = (counts > 0).sum(dim=0).float()
+        
+        # 2. Match devices for division (M_active and N_env are moved to GPU)
+        M_active = active_set_size.to(self.dataset_sizes.device)
+        
+        # 3. Calculate Fraction (M / N_env)
+        fraction = M_active / N_env
         
         # 4. Log
         state['data']['active_memory_fraction'].append(fraction.cpu().numpy())
+
+# gemini pro 2.5
+class UniqueSampleSeenTracker(Interceptor):
+    """
+    Tracks the total count of unique global indices seen by *each* network 
+    stream independently. Logs the result as a tensor of shape (n_models,).
+    """
+    def __init__(self, max_samples):
+        super().__init__()
+        if not isinstance(max_samples, int) or max_samples <= 0:
+            raise ValueError("max_samples must be a positive integer.")
+        self.max_samples = max_samples
+
+    def before_train(self, state):
+        n_networks = state['n_networks']
+        # Initialize a persistent 2D boolean mask: (max_samples, n_networks)
+        # Row = Global Sample ID; Column = Network ID
+        self.seen_mask = torch.zeros((self.max_samples, n_networks), dtype=torch.bool, device='cpu')
+        
+        # We reuse the original log key, but the data structure now holds per-model counts
+        state['data']['unique_samples_seen'] = [] 
+
+    # Listen to after_step to capture all batch indices and update the 2D mask
+    def after_step(self, state):
+        idx = state.get('idx')
+        padding_value = state.get('padding_value', -1)
+
+        if idx is None:
+            return
+
+        # Move tensors to CPU to match the persistent mask and ensure safety
+        idx_cpu = idx.detach().cpu()
+        
+        # 1. Create a validity mask (where indices are NOT padding)
+        is_valid = (idx_cpu != padding_value)
+
+        # 2. Find the coordinates (batch_row, network_col) for all valid samples
+        # coords is a tuple of (row indices, col indices) for the 2D batch tensor
+        coords = torch.where(is_valid)
+
+        if coords[0].numel() == 0:
+            return
+
+        # 3. Extract Global Sample IDs (The row index for the persistent mask)
+        # Uses advanced indexing on the idx tensor to get the actual global ID at that coordinate
+        global_sample_ids = idx_cpu[coords].long() 
+
+        # 4. Extract Network IDs (The column index for the persistent mask)
+        network_ids = coords[1].long() 
+
+        # 5. Update the 2D mask (Target shape: [max_samples, n_networks])
+        # This is the key update: Set the specific (Sample ID, Network ID) cell to True
+        self.seen_mask[global_sample_ids, network_ids] = True 
+
+    def after_test(self, state):
+        """
+        Calculates the count of unique samples seen PER network (summing along dim 0)
+        and logs the resulting tensor of shape (n_models,).
+        """
+        # Sum the mask along the sample dimension (dim 0) to get the count PER network
+        # Result shape: (n_networks,)
+        unique_count_tensor = self.seen_mask.sum(dim=0).float()
+        
+        # Log the tensor
+        state['data']['unique_samples_seen'].append(unique_count_tensor.numpy())
+        
+class MistakeReplay(Interceptor):
+    def __init__(self, sample_memorizer, 
+                       data_source, 
+                       optimizer, 
+                       replay_frequency, 
+                       n_replays, 
+                       batch_size, 
+                       criterion=None, 
+                       forget=False, 
+                       num_workers=0):
+        super().__init__()
+        self.data_source = data_source
+        self.optimizer = optimizer
+        self.replay_frequency = replay_frequency # TODO: check list
+        self.n_replays = n_replays
+        self.batch_size = batch_size
+        self.forget = forget
+        self.criterion = criterion
+        self.sample_memorizer = sample_memorizer
+        self.num_workers = num_workers 
+        
+    def before_train(self, state):
+        n_networks, device = state['n_networks'], state['device']
+        freq = self.replay_frequency if isinstance(self.replay_frequency, (list, np.ndarray, torch.Tensor)) else [self.replay_frequency] * n_networks
+        replays = self.n_replays if isinstance(self.n_replays, (list, np.ndarray, torch.Tensor)) else [self.n_replays] * n_networks
+        self.replay_frequencies = torch.tensor(freq, device=device)
+        self.n_replays = torch.tensor(replays, device=device)
+    
+    def after_update(self, state):
+        step = state['step']
+        active_on_freq = (self.replay_frequencies > 0) & (step % self.replay_frequencies == 0)
+        if not active_on_freq.any():
+            return
+
+        if not hasattr(self.sample_memorizer, 'get_samples'):
+            print("⚠️ '.get_samples()' not in sample_memorizer. Skipping replay.")
+            return
+        
+        max_replays_this_step = self.n_replays[active_on_freq].max().item()
+        criterion = state['criterion'] if self.criterion is None else self.criterion
+        for replay_step in range(1, max_replays_this_step+1): # means n_replays [0, 0, 1, 2] gives no replay to 0s
+            per_sample_backward_counts = self.sample_memorizer.get_samples()
+            idxs_to_replay = [torch.tensor(np.where(n > 0)[0]) if active_on_freq[i] else [] for i, n in enumerate(per_sample_backward_counts.T)]
+            replay_sampler = FixedEpochSampler(self.data_source,
+                                           idxs_to_replay,
+                                           self.batch_size,
+                                           padding_value=state['padding_value'])
+            replay_dataloader = DataLoader(self.data_source,
+                                         batch_sampler=replay_sampler,
+                                         collate_fn=collate_fn(state['n_networks']),
+                                         num_workers=self.num_workers,
+                                         shuffle=False)
+            active_this_loop = (active_on_freq & (replay_step <= self.n_replays)).float()
+            # do loop
+            for (x, y, idx) in replay_dataloader:
+                x, y, idx = x.to(state['device']), y.to(state['device']), idx.to(state['device']) 
+                if len(x.shape) < 3:
+                    x, y = x.unsqueeze(1), y.unsqueeze(1).repeat((1, state['n_networks'], 1))
+                    idx = idx.unsqueeze(1).repeat(1, state['n_networks'])   
+                state['x'], state['y'], state['idx'] = x, y, idx
+                self.trainer._fire_event('before_update')
+                self.trainer._fire_event('before_train_forward')
+                y_hat = state['model'](x)
+                
+                self.optimizer.zero_grad()
+                
+                per_sample_supervised_loss = criterion(y_hat, y, idx, state['padding_value'])
+                state['per_sample_losses'] = per_sample_supervised_loss
+                mask = (idx != state['padding_value'])
+                n_valid_samples = mask.sum(0)
+                supervised_loss = per_sample_supervised_loss.sum(0) * active_this_loop / (n_valid_samples + 1e-12) # average 
+                state['loss'] = supervised_loss
+                
+                correct = ((y_hat.argmax(-1) == y.argmax(-1)) * (idx != state['padding_value'])).sum(0)
+                state['correct'] = correct
+                
+                self.trainer._fire_event('after_train_forward')
+                                  
+                loss = state['loss']
+                
+                loss.sum().backward()
+                self.trainer._fire_event('before_step')
+                self.optimizer.step()
+                self.trainer._fire_event('after_step')
+                
+                if self.forget:
+                    self.sample_memorizer.forget_samples(y_hat, y, idx, state['padding_value'])
+                    
+                # after_update would cause infinite loop, i know because that use to be here
+                
+class RememberMistakes(Interceptor):
+    def __init__(self, max_samples, forget=False):
+        super().__init__()
+        if not isinstance(max_samples, int) or max_samples <= 0:
+            raise ValueError("max_samples must be a positive integer.")
+        self.max_samples = max_samples
+        self.forget = forget
+
+    def before_train(self, state):
+        n_networks = state['n_networks']
+        self.remember_samples = torch.zeros((self.max_samples, n_networks), dtype=torch.long)
+        state['data']['remember_samples'] = self.remember_samples
+
+    def after_update(self, state):
+        per_sample_loss = state.get('per_sample_losses').cpu()
+        idx = state.get('idx').cpu()
+
+        if per_sample_loss is None or idx is None:
+            return
+
+        # get indices of valid samples that contributed to the loss
+        update_coords = torch.where(
+            (per_sample_loss > 1e-9) & (idx != state.get('padding_value', -1)) # eps for rounding errors
+        )
+        
+        if update_coords[0].numel() == 0:
+            return 
+
+                            #    Gemini-Pro 2.5 tip
+                            #             |
+                            #             V
+        self.remember_samples.index_put_(
+            (idx[update_coords], update_coords[1]),
+            torch.tensor(1, device='cpu')
+        )
+        if self.forget:
+            self.forget_samples(state['y_hat'], state['y'], state['idx'], state['padding_value'])
+
+    def after_train(self, state):
+        state['data']['remember_samples'] = self.remember_samples.clone().numpy()
+    
+    # interface with replay
+    def forget_samples(self, y_hat, y, idx=None, padding_value=None):
+        correct = ((y_hat.argmax(-1) == y.argmax(-1)) * (idx != padding_value))
+        forget_idxs = torch.where(correct)
+        self.remember_samples.index_put_(
+            (idx[correct], forget_idxs[1]),
+            torch.tensor(0, device=self.remember_samples.device)
+            )
+        #print(self.remember_samples.sum(0))
+    
+    # interface with replay
+    def get_samples(self):
+        return self.remember_samples
+    
+    # interface with hard mining sampler 
+    def get_samples_as_list_per_network(self, i):
+        return np.where(self.remember_samples.T[i] > 0)[0].tolist()
 
 ############################## TEST LOOP ##################################
 """
@@ -452,8 +855,9 @@ class PerSampleBackwardCounter(Interceptor):
         self.per_sample_backward_counts = torch.zeros((self.max_samples, n_networks), dtype=torch.long)
         state['data']['per_sample_backward_counts'] = self.per_sample_backward_counts
 
-    def after_update(self, state):
+    def after_step(self, state):
         per_sample_loss = state.get('per_sample_losses').cpu()
+
         idx = state.get('idx').cpu()
 
         if per_sample_loss is None or idx is None:
@@ -463,7 +867,6 @@ class PerSampleBackwardCounter(Interceptor):
         update_coords = torch.where(
             (per_sample_loss > 1e-9) & (idx != state.get('padding_value', -1)) # eps for rounding errors
         )
-        
         if update_coords[0].numel() == 0:
             return 
 
@@ -486,65 +889,6 @@ class PerSampleBackwardCounter(Interceptor):
     # interface with hard mining sampler     
     def get_samples_as_list_per_network(self, i):
         return np.where(self.per_sample_backward_counts.T[i] > 0)[0].tolist()
-    
-class RememberMistakes(Interceptor):
-    def __init__(self, max_samples, forget=False):
-        super().__init__()
-        if not isinstance(max_samples, int) or max_samples <= 0:
-            raise ValueError("max_samples must be a positive integer.")
-        self.max_samples = max_samples
-        self.forget = forget
-
-    def before_train(self, state):
-        n_networks = state['n_networks']
-        self.remember_samples = torch.zeros((self.max_samples, n_networks), dtype=torch.long)
-        state['data']['remember_samples'] = self.remember_samples
-
-    def after_update(self, state):
-        per_sample_loss = state.get('per_sample_losses').cpu()
-        idx = state.get('idx').cpu()
-
-        if per_sample_loss is None or idx is None:
-            return
-
-        # get indices of valid samples that contributed to the loss
-        update_coords = torch.where(
-            (per_sample_loss > 1e-9) & (idx != state.get('padding_value', -1)) # eps for rounding errors
-        )
-        
-        if update_coords[0].numel() == 0:
-            return 
-
-                            #    Gemini-Pro 2.5 tip
-                            #             |
-                            #             V
-        self.remember_samples.index_put_(
-            (idx[update_coords], update_coords[1]),
-            torch.tensor(1, device='cpu')
-        )
-        if self.forget:
-            self.forget_samples(state['y_hat'], state['y'], state['idx'], state['padding_value'])
-
-    def after_train(self, state):
-        state['data']['remember_samples'] = self.remember_samples.clone().numpy()
-    
-    # interface with replay
-    def forget_samples(self, y_hat, y, idx=None, padding_value=None):
-        correct = ((y_hat.argmax(-1) == y.argmax(-1)) * (idx != padding_value))
-        forget_idxs = torch.where(correct)
-        self.remember_samples.index_put_(
-            (idx[correct], forget_idxs[1]),
-            torch.tensor(0, device=self.remember_samples.device)
-            )
-        #print(self.remember_samples.sum(0))
-    
-    # interface with replay
-    def get_samples(self):
-        return self.remember_samples
-    
-    # interface with hard mining sampler 
-    def get_samples_as_list_per_network(self, i):
-        return np.where(self.remember_samples.T[i] > 0)[0].tolist()
     
 # Gemini-Pro
 class WeightStatsTracker(Interceptor):
@@ -1216,98 +1560,6 @@ class L2Regularizer(Interceptor):
         scaled_penalty = l2_penalty_sq * lambda_tensor
         
         state['loss'] = state['loss'] + scaled_penalty
-
-# TODO: in theory replay could be applied to any stat
-# TODO: this might require different logic to handle replay only events
-class MistakeReplay(Interceptor):
-    def __init__(self, sample_memorizer, 
-                       data_source, 
-                       optimizer, 
-                       replay_frequency, 
-                       n_replays, 
-                       batch_size, 
-                       criterion=None, 
-                       forget=False, 
-                       num_workers=0):
-        super().__init__()
-        self.data_source = data_source
-        self.optimizer = optimizer
-        self.replay_frequency = replay_frequency # TODO: check list
-        self.n_replays = n_replays
-        self.batch_size = batch_size
-        self.forget = forget
-        self.criterion = criterion
-        self.sample_memorizer = sample_memorizer
-        self.num_workers = num_workers 
-        
-    def before_train(self, state):
-        n_networks, device = state['n_networks'], state['device']
-        freq = self.replay_frequency if isinstance(self.replay_frequency, (list, np.ndarray, torch.Tensor)) else [self.replay_frequency] * n_networks
-        replays = self.n_replays if isinstance(self.n_replays, (list, np.ndarray, torch.Tensor)) else [self.n_replays] * n_networks
-        self.replay_frequencies = torch.tensor(freq, device=device)
-        self.n_replays = torch.tensor(replays, device=device)
-    
-    def after_update(self, state):
-        step = state['step']
-        active_on_freq = (self.replay_frequencies > 0) & (step % self.replay_frequencies == 0)
-        if not active_on_freq.any():
-            return
-
-        if not hasattr(self.sample_memorizer, 'get_samples'):
-            print("⚠️ '.get_samples()' not in sample_memorizer. Skipping replay.")
-            return
-        
-        max_replays_this_step = self.n_replays[active_on_freq].max().item()
-        criterion = state['criterion'] if self.criterion is None else self.criterion
-        for replay_step in range(1, max_replays_this_step+1): # means n_replays [0, 0, 1, 2] gives no replay to 0s
-            per_sample_backward_counts = self.sample_memorizer.get_samples()
-            idxs_to_replay = [torch.tensor(np.where(n > 0)[0]) if active_on_freq[i] else [] for i, n in enumerate(per_sample_backward_counts.T)]
-            replay_sampler = FixedEpochSampler(self.data_source,
-                                           idxs_to_replay,
-                                           self.batch_size,
-                                           padding_value=state['padding_value'])
-            replay_dataloader = DataLoader(self.data_source,
-                                         batch_sampler=replay_sampler,
-                                         collate_fn=collate_fn(state['n_networks']),
-                                         num_workers=self.num_workers,
-                                         shuffle=False)
-            active_this_loop = (active_on_freq & (replay_step <= self.n_replays)).float()
-            # do loop
-            for (x, y, idx) in replay_dataloader:
-                x, y, idx = x.to(state['device']), y.to(state['device']), idx.to(state['device']) 
-                if len(x.shape) < 3:
-                    x, y = x.unsqueeze(1), y.unsqueeze(1).repeat((1, state['n_networks'], 1))
-                    idx = idx.unsqueeze(1).repeat(1, state['n_networks'])   
-                state['x'], state['y'], state['idx'] = x, y, idx
-                self.trainer._fire_event('before_update')
-                self.trainer._fire_event('before_train_forward')
-                y_hat = state['model'](x)
-                
-                self.optimizer.zero_grad()
-                
-                per_sample_supervised_loss = criterion(y_hat, y, idx, state['padding_value'])
-                state['per_sample_losses'] = per_sample_supervised_loss
-                mask = (idx != state['padding_value'])
-                n_valid_samples = mask.sum(0)
-                supervised_loss = per_sample_supervised_loss.sum(0) * active_this_loop / (n_valid_samples + 1e-12) # average 
-                state['loss'] = supervised_loss
-                
-                correct = ((y_hat.argmax(-1) == y.argmax(-1)) * (idx != state['padding_value'])).sum(0)
-                state['correct'] = correct
-                
-                self.trainer._fire_event('after_train_forward')
-                                  
-                loss = state['loss']
-                
-                loss.sum().backward()
-                self.trainer._fire_event('before_step')
-                self.optimizer.step()
-                self.trainer._fire_event('after_step')
-                
-                if self.forget:
-                    self.sample_memorizer.forget_samples(y_hat, y, idx, state['padding_value'])
-                    
-                # after_update would cause infinite loop, i know because that use to be here
                 
 class Automasking(Interceptor):
     def __init__(self, threshold=0.1, p=1, model=None):

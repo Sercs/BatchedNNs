@@ -1702,10 +1702,10 @@ if __name__ in '__main__':
     print(DEVICE)
     
     
-    N_NETWORKS = 5
+    N_NETWORKS = 10
     N_NETWORKS2 = N_NETWORKS
     N_IN = 784
-    N_HID = 500
+    N_HID = 100
     N_OUT = 10
     ACTIVATION_FUNCTION = 'gelu'
     
@@ -1715,7 +1715,7 @@ if __name__ in '__main__':
     
     DATASET = 'MNIST'
     NORMALIZED = 'True'
-    N_EPOCHS = 0.05
+    N_EPOCHS = 3.0
     TEST_INTERVAL = 0.01
     BATCH_SIZE = 1
     TEST_BATCH_SIZE = 256
@@ -1723,7 +1723,7 @@ if __name__ in '__main__':
     
     NAME = 'EMNIST_TEST'
     
-    LR = 0.000003
+    LR = 0.01
     
     LOSS = 'MSELoss'
     OPTIM = 'SGD'
@@ -1764,16 +1764,16 @@ if __name__ in '__main__':
     train = dm.DatasetWithIdx(train_dataset, task='classify')
     test = dm.DatasetWithIdx(test_dataset, task='classify')
     
+    # dataset_sizes = np.linspace(2000, 60_000, num=N_NETWORKS, dtype=int)
     # s=samplers.VaryBatchAndDatasetSizeSampler(train, 
     #                                           N_NETWORKS, 
-    #                                           np.linspace(2000, 60_000, num=N_NETWORKS, dtype=int),
+    #                                           dataset_sizes,
     #                                           batch_sizes=1,
     #                                           order='random',
-    #                                           method='stretch')
-    
+    #                                           method='loop')
+    s=samplers.RandomSampler(train, N_NETWORKS, BATCH_SIZE)
     general_collate = samplers.collate_fn(N_NETWORKS) # used to provide samples as expected for training (x, y, idx)
                                                       # tracking indices is non-standard default PyTorch
-    s=samplers.RandomSampler(train, N_NETWORKS, BATCH_SIZE)
     train_dataloader = DataLoader(train,
                                 num_workers=0,
                                 batch_sampler=s, # required
@@ -1800,28 +1800,39 @@ if __name__ in '__main__':
                                                                      'b' : INIT_RANGE[1]})
                             ).to(DEVICE)
     
-    optimizer = batch_optimizers.Competitive(batch_optimizers.AdamW(model.parameters(),
-                                     lr=LR,
-                                     beta1=0.9),
-                                     k=np.linspace(0.1, 1.0, N_NETWORKS),
-                                     selection_key='exp_avg_sq',
-                                     selection_mode='top')
-    criterion1 = batch_losses.MSELoss()
+    optimizer = batch_optimizers.SGD(model.parameters(),
+                                     lr=LR)
+    criterion1 = batch_losses.StatefulLazyLoss(batch_losses.MSELoss(), 
+                                               60_000, 
+                                               N_NETWORKS)
     
     initial_param_provider = interceptors.InitialParameterProvider()
     previous_param_provider = interceptors.PreviousParameterProvider()
+    
+    remember = interceptors.RememberMistakes(60_000, forget=False)
     
     trackers = [interceptors.Timer(),
                 interceptors.EpochCounter(60_000),
                 interceptors.ForwardPassCounter(),
                 interceptors.BackwardPassCounter(),
+                remember,
+                interceptors.UniqueSampleSeenTracker(60_000),
+                interceptors.PerSampleBackwardCounter(60_000),
+                interceptors.ActiveMemoryFractionTracker(60_000),
+                interceptors.ActiveMemorySizeTracker(),
+                interceptors.HomeostaticSleepReplay(remember, 
+                                                    train, 
+                                                    optimizer,
+                                                    criterion=batch_losses.LazyLoss(batch_losses.MSELoss()),
+                                                    growth_threshold=[0.0, 0.2, 0.4, 0.8, 1.6, 3.2, 6.4, 12.8, 25.6, 100000000000000],
+                                                    batch_size=1),
                 previous_param_provider,
                 initial_param_provider,
                 interceptors.WeightStatsTracker(tensors_to_track=['weights', 'gradients'], stats_to_track=['min', 'mean', 'max', 'std', 'norm'], granularity='layerwise'),
                 interceptors.EnergyMetricTracker(1, previous_param_provider, mode='energy', granularity='network', components=['total', 'weight', 'bias']), # L1
                 interceptors.EnergyMetricTracker(0, previous_param_provider, mode='energy', granularity='network', components=['total', 'weight', 'bias']), # L0
-                interceptors.EnergyMetricTracker(1, previous_param_provider, mode='energy', granularity='layerwise', components=['total', 'weight', 'bias']), # L1
-                interceptors.EnergyMetricTracker(0, previous_param_provider, mode='energy', granularity='layerwise', components=['total', 'weight', 'bias']), # L0
+                interceptors.EnergyMetricTracker(1, initial_param_provider, mode='minimum_energy', granularity='network', components=['total', 'weight', 'bias']), # L1
+                interceptors.EnergyMetricTracker(0, initial_param_provider, mode='minimum_energy', granularity='network', components=['total', 'weight', 'bias']), # L0
                 interceptors.TestLoop('test',
                                     test_dataloader,
                                     criterions = {'MSELoss' : batch_losses.MSELoss(),
@@ -1844,6 +1855,7 @@ if __name__ in '__main__':
                                 trackers=trackers,
                                 device=DEVICE)
     t.train_loop(N_EPOCHS, TEST_INTERVAL)
+    data = t.state['data']
 
         
     
